@@ -1,0 +1,874 @@
+AI RECIPE AUTOMATION PROJECT — CODEX HANDOFF
+Generated from prior ChatGPT planning conversation
+Date: 2026-08-03
+
+======================================================================
+1. USER BACKGROUND
+======================================================================
+
+I am a semi-experienced web developer with:
+- About 4 years of Python experience
+- A couple of weeks of Node.js/Typescript experience
+- A bachelor's degree in computer science
+- Most of my Python experience in PyTorch, geospatial processing, remote
+  sensing, scientific workflows, Docker/Singularity, and HPC
+- Enough web-development experience to build APIs and basic front ends, but
+  I would like Codex to help with architecture, implementation, testing,
+  Google APIs, authentication, and production-quality structure
+- I am looking to learn from this project myself. I want to improve at 
+coding overall, and am considering using Node.js and frameworks other than
+Python since I want to diversify my coding abilities. 
+
+The folder at C:\Users\sandy\Documents\Development\IG_Recipe_Trans\Instagram_Recipe_Transcriber
+is a GitHub repository. 
+
+======================================================================
+2. PROJECT GOAL
+======================================================================
+
+Again, I am looking to learn from this experience. If you think Node.js would be
+digestible for me as a python developer, then I would be happy to do it that way.
+
+I have a Google Sheets file in my personal Google Drive. Each row contains:
+- An Instagram recipe link, usually an Instagram Reel
+- A short description, which may be empty
+
+I want an automated or mostly automated pipeline that turns each Instagram
+recipe link into a formatted Google Doc recipe stored in my personal Google
+Drive.
+
+The pipeline should:
+1. Read new recipe rows from Google Sheets.
+2. Acquire enough source material from the Instagram Reel:
+   - Caption text
+   - Audio/narration
+   - On-screen text
+   - Possibly the video itself or a local screen recording
+3. Determine where the actual recipe information is located.
+4. Extract a structured recipe without inventing missing information.
+5. Calculate nutrition when the inputs are sufficiently complete.
+6. Create a Google Doc using a consistent recipe template.
+7. Store the Google Doc in a selected Drive folder.
+8. Write the output Doc URL and processing status back into the Sheet.
+9. Handle retries, rate limits, partial data, duplicate links, and failures.
+10. Preserve enough intermediate data to debug errors.
+
+This should be treated as a multimodal ETL pipeline with a human-review path,
+not as one large prompt that sends an Instagram URL to an LLM.
+
+======================================================================
+3. SOURCE VARIABILITY AND MAIN CHALLENGES
+======================================================================
+
+Instagram recipe videos vary substantially:
+
+- Some captions contain the complete recipe and quantities.
+- Some videos show all ingredients and quantities as on-screen text.
+- Some narrations describe the process but omit measurements.
+- Some videos say "use the seasonings shown on screen."
+- Some captions say "full recipe in caption."
+- Some videos are only food showcases and do not provide a usable recipe.
+- Captions, audio, and on-screen text may conflict.
+- Some videos may require a logged-in Instagram session to access.
+- Official Meta APIs may not support retrieving arbitrary public Reels from
+  unrelated creators.
+- Scraping Instagram pages is likely to be brittle and may raise terms-of-use
+  or authorization concerns.
+- Downloading, transcoding, or screen recording a video does not remove its
+  copyright.
+- LLMs may hallucinate missing quantities if not constrained.
+- API calls must be rate-limited, retryable, and idempotent.
+- Long-running media and LLM work should not be placed in Google Apps Script.
+
+Important copyright/product requirement:
+- The output should be a normalized recipe based on factual ingredients,
+  quantities, and cooking methods.
+- Do not redistribute source videos, images, or a creator's distinctive prose.
+- Retain the source URL and creator attribution when available.
+- Treat downloaded media as a temporary processing artifact and optionally
+  delete it after successful extraction.
+- Use only media I am authorized to access and process.
+- Do not describe transcoded media as "non-copyrighted."
+
+======================================================================
+4. TARGET RECIPE TEMPLATE
+======================================================================
+
+The current Markdown template is:
+
+### **Shopping List (MAKES 4 SERVINGS)**
+
+* **Component 1:**
+  * element 1
+  * element 2
+
+#### ---
+
+### **Recipe**
+
+1. **Step 1 name**: directions
+
+---
+
+###
+
+### **Nutrition info**
+
+**Calories**: approximately 220–280
+**Protein**: approximately 8–11 g
+**Fiber**: approximately 7–10 g
+**Carbohydrates**: approximately 25–35 g
+**Fat**: approximately 10–14 g
+
+The eventual Google Doc template should probably use placeholders such as:
+
+{{TITLE}}
+{{SOURCE_LINK}}
+{{CREATOR}}
+{{DESCRIPTION}}
+{{SERVINGS}}
+{{SHOPPING_LIST}}
+{{RECIPE_STEPS}}
+{{NUTRITION}}
+{{NOTES}}
+{{MISSING_INFORMATION}}
+
+The rendered recipe should:
+- Group the shopping list by recipe component when useful.
+- Include preparation details in ingredient lines when supported.
+- Use numbered steps.
+- Prefer descriptive bold step labels, for example:
+  1. **Prepare the sausage:** ...
+- Include nutrition per serving only when it can be calculated reliably.
+- Clearly state when nutrition or measurements are incomplete.
+- Preserve "to taste," "approximately," optional ingredients, and ranges.
+- Avoid silently assuming four servings if servings are unknown.
+
+======================================================================
+5. PROPOSED HIGH-LEVEL ARCHITECTURE
+======================================================================
+
+Google Sheet
+    |
+    v
+Job poller / queue reader
+    |
+    v
+Instagram/media acquisition
+    |
+    v
+Caption extraction + audio extraction + frame/OCR extraction
+    |
+    v
+Source classification
+    |
+    v
+Structured recipe extraction
+    |
+    v
+Deterministic validation
+    |
+    +--> REVIEW if incomplete or conflicting
+    |
+    v
+Nutrition normalization and calculation
+    |
+    v
+Google Doc generation
+    |
+    v
+Update Google Sheet with status, metadata, and Doc URL
+
+Preserve these source layers independently:
+
+- caption_raw
+- transcript_raw
+- transcript_segments with timestamps
+- onscreen_text_raw
+- onscreen_text_segments with timestamps
+- selected_video_frames or frame metadata
+- recipe_structured
+- validation_report
+- nutrition_matches
+- rendered_document_metadata
+
+Do not immediately merge all source material into one unlabeled block. Every
+extracted ingredient or instruction should retain provenance.
+
+======================================================================
+6. SUGGESTED GOOGLE SHEET COLUMNS
+======================================================================
+
+Existing:
+- recipe_url
+- description
+
+Suggested additions:
+- recipe_id
+- instagram_shortcode
+- status
+- stage
+- attempts
+- priority
+- requested_at
+- processing_started_at
+- processing_until
+- processed_at
+- last_error
+- error_type
+- source_type
+- extraction_confidence
+- validation_status
+- media_path
+- caption_available
+- audio_available
+- onscreen_text_available
+- creator
+- title
+- servings
+- doc_id
+- doc_url
+- processor_version
+- prompt_version
+- schema_version
+- force_reprocess
+- review_notes
+
+Possible status values:
+- NEW
+- WAITING_FOR_MEDIA
+- ACQUIRING
+- EXTRACTING
+- CLASSIFYING
+- STRUCTURING
+- VALIDATING
+- NUTRITION
+- RENDERING
+- REVIEW
+- DONE
+- ERROR
+- SKIPPED
+
+Use the Instagram shortcode or a normalized URL hash as an idempotency key.
+Do not create duplicate Google Docs after retries or worker crashes.
+
+======================================================================
+7. MEDIA ACQUISITION STRATEGY
+======================================================================
+
+This is likely the most brittle stage and should be isolated behind an
+interface.
+
+Suggested abstraction:
+
+class MediaAcquirer:
+    def acquire(self, job: RecipeJob) -> AcquiredMedia:
+        ...
+
+Possible adapters:
+- LocalFileAcquirer
+- AuthorizedDownloadAcquirer
+- MetaApiAcquirer
+- BrowserSessionAcquirer, only if legally/technically appropriate
+- ManualReviewAcquirer
+
+Recommended MVP:
+- Do not initially automate arbitrary Instagram downloading.
+- I manually download or screen-record a Reel into a watched folder.
+- Name the file with the Instagram shortcode, for example:
+  data/incoming/DbjBsEfx3j5.mp4
+- The worker finds the matching NEW or WAITING_FOR_MEDIA Sheet row.
+- Everything after acquisition is automated.
+
+This keeps Instagram access separate from the core recipe-processing system.
+A local-file fallback should remain even after adding other acquisition
+methods.
+
+Need to verify current official Meta/Instagram API capabilities and terms
+before implementing an automated adapter. Do not rely on remembered API
+details; consult current official documentation.
+
+======================================================================
+8. AUDIO EXTRACTION AND TRANSCRIPTION
+======================================================================
+
+Use FFmpeg to extract normalized audio, for example:
+
+ffmpeg -i input.mp4 -vn -ac 1 -ar 16000 audio.wav
+
+Suggested requirements:
+- Keep transcript segments with start/end timestamps.
+- Use a local Whisper-compatible implementation for the MVP if practical.
+- Local transcription avoids a transcription API rate limit and upload cost.
+- Recipe videos are short enough that local processing should be manageable.
+- Retain the raw transcription and a lightly normalized version.
+- Never replace uncertain measurements silently.
+- Mark low-confidence words, especially units, temperatures, cheese names,
+  spices, and numbers.
+
+Potential libraries/tools to evaluate:
+- faster-whisper
+- whisper.cpp
+- OpenAI transcription API, if preferred later
+- FFmpeg via subprocess or ffmpeg-python
+
+Use current package documentation and pin versions.
+
+======================================================================
+9. VIDEO FRAME EXTRACTION AND OCR
+======================================================================
+
+On-screen text is essential because many Reels omit quantities from narration.
+
+Proposed process:
+1. Detect scene changes and/or sample frames at a configurable rate.
+2. Calculate perceptual hashes.
+3. Remove near-duplicate frames.
+4. Detect frames likely to contain text.
+5. Run OCR on the reduced frame set.
+6. Preserve timestamps and frame paths/hashes.
+7. Deduplicate repeated OCR text using normalized text similarity.
+8. Optionally send only ambiguous, distinct frames to a vision model.
+
+Do not send every video frame to a vision LLM.
+
+Possible implementation ideas:
+- FFmpeg scene detection
+- OpenCV frame sampling
+- imagehash or OpenCV perceptual hashing
+- PaddleOCR, EasyOCR, Tesseract, or a vision-capable LLM
+- Recipe-specific OCR normalization for:
+  - tsp, tbsp, cup, oz, lb, g, kg, ml
+  - fractions such as 1/2, 1/3, 1/4, 3/4
+  - Unicode fractions
+  - temperatures
+  - line breaks and overlaid labels
+
+Example OCR segment:
+
+{
+  "start_seconds": 2.4,
+  "end_seconds": 4.1,
+  "frame_path": "working/.../frame_00024.jpg",
+  "text_raw": "1 tsp fennel seeds\n1 tsp garlic powder",
+  "text_normalized": "1 tsp fennel seeds; 1 tsp garlic powder",
+  "confidence": 0.93
+}
+
+Need tests for duplicate overlays, animated text, bad contrast, and captions
+covering ingredient text.
+
+======================================================================
+10. CAPTION ACQUISITION
+======================================================================
+
+Store:
+- caption_raw
+- caption_source
+- caption_retrieved_at
+- caption_language
+- caption_parse_status
+
+Desired acquisition order:
+1. Official supported API metadata, where available and authorized.
+2. Metadata returned by an authorized acquisition tool.
+3. A browser helper or manual caption paste.
+4. Mark caption unavailable.
+
+Do not make logged-in HTML scraping the only method.
+
+Caption parsing should identify:
+- Recipe title
+- Servings
+- Ingredient blocks
+- Instructions
+- Nutrition claims
+- Creator notes
+- Hashtags and promotional text to ignore
+- "Full recipe in bio" or external recipe URLs
+- Potential substitutions
+- Sponsored product language
+
+Keep raw caption text even after parsing.
+
+======================================================================
+11. SOURCE CLASSIFICATION
+======================================================================
+
+Before full extraction, classify the available material into one of:
+
+- CAPTION_COMPLETE
+- ONSCREEN_COMPLETE
+- NARRATION_COMPLETE
+- HYBRID_COMPLETE
+- PARTIAL_RECIPE
+- NOT_A_RECIPE
+- UNDETERMINED
+
+The classifier should consider:
+- Whether ingredients have quantities
+- Whether steps are present
+- Whether servings are present
+- Whether the narration explicitly refers to on-screen text
+- Whether the caption says the full recipe is elsewhere
+- Whether the content is only a showcase/review
+
+The classification determines which sources should be prioritized by the
+structured extraction stage.
+
+======================================================================
+12. STRUCTURED RECIPE SCHEMA
+======================================================================
+
+Do not ask an LLM to directly produce final Markdown or Google Docs formatting.
+Require strict structured output validated with Pydantic or JSON Schema.
+
+Suggested model, subject to refinement:
+
+Recipe
+- recipe_id: str
+- title: str | None
+- source_url: str
+- creator: str | None
+- description: str | None
+- servings: float | None
+- servings_text: str | None
+- yield_text: str | None
+- classification: enum
+- components: list[RecipeComponent]
+- steps: list[RecipeStep]
+- nutrition: NutritionSummary | None
+- missing_information: list[str]
+- conflicts: list[SourceConflict]
+- warnings: list[str]
+- overall_confidence: float
+- source_summary: SourceSummary
+- extraction_metadata: ExtractionMetadata
+
+RecipeComponent
+- name: str
+- ingredients: list[Ingredient]
+
+Ingredient
+- ingredient_id: str
+- quantity: Decimal | None
+- quantity_max: Decimal | None
+- quantity_text: str | None
+- unit: str | None
+- normalized_unit: str | None
+- ingredient: str
+- preparation: str | None
+- optional: bool
+- to_taste: bool
+- brand: str | None
+- raw_text: str
+- evidence: list[EvidenceRef]
+- confidence: float
+- notes: list[str]
+
+RecipeStep
+- step_number: int
+- label: str | None
+- instruction: str
+- ingredient_refs: list[str]
+- time_seconds: int | None
+- temperature_value: float | None
+- temperature_unit: str | None
+- equipment: list[str]
+- evidence: list[EvidenceRef]
+- confidence: float
+
+EvidenceRef
+- source_type: caption | transcript | onscreen | description | inference
+- source_id: str
+- timestamp_start: float | None
+- timestamp_end: float | None
+- excerpt: str | None
+- confidence: float
+
+SourceConflict
+- field_path: str
+- values: list[ConflictingValue]
+- resolution: str | None
+- requires_review: bool
+
+Critical extraction rules:
+- Never invent a quantity.
+- Never infer servings from the number of plates or bowls shown.
+- Do not silently resolve conflicting measurements.
+- Distinguish exact amounts, ranges, approximate amounts, optional ingredients,
+  and "to taste."
+- Preserve ingredient component groupings.
+- Preserve evidence for every ingredient and step.
+- List missing information explicitly.
+- Use inference only when clearly labeled and allowed by configuration.
+- Do not calculate nutrition in the extraction call.
+- Do not convert units unless the original amount is retained.
+- Do not treat creator nutrition claims as verified calculations.
+
+======================================================================
+13. DETERMINISTIC VALIDATION
+======================================================================
+
+After LLM extraction, run code-based checks.
+
+Examples:
+- Recipe has at least one component and one step.
+- Major ingredients have quantities if nutrition is requested.
+- Servings are present before per-serving nutrition is calculated.
+- Every ingredient reference in steps exists.
+- Ingredients used in steps but missing from the shopping list are flagged.
+- Shopping-list ingredients never used in any step are flagged.
+- Temperatures include a unit.
+- "Seasonings shown on screen" without recovered OCR triggers review.
+- Caption and on-screen quantities that disagree trigger review.
+- Very low-confidence numbers or units trigger review.
+- Duplicate ingredients are merged only when safely equivalent.
+- Unrealistic quantities are flagged, not automatically changed.
+- Twenty cloves of garlic may be intentional; unusual is not automatically
+  wrong.
+
+Example:
+
+def needs_review(recipe: Recipe, report: ValidationReport) -> bool:
+    return any([
+        recipe.overall_confidence < 0.80,
+        recipe.servings is None,
+        not recipe.components,
+        not recipe.steps,
+        report.has_unresolved_conflicts,
+        report.has_missing_major_quantities,
+        any(i.confidence < 0.65 for i in recipe.all_ingredients()),
+    ])
+
+Rows that fail validation should normally become REVIEW, not ERROR.
+
+======================================================================
+14. NUTRITION CALCULATION
+======================================================================
+
+Nutrition should be a separate deterministic or semi-deterministic stage.
+
+Potential data source:
+- USDA FoodData Central API
+- Verify current API documentation, authentication, quotas, and data fields
+
+Suggested process:
+1. Normalize each ingredient.
+2. Convert amounts to grams or milliliters where possible.
+3. Search the nutrition database.
+4. Select a match with a confidence score.
+5. Preserve the selected database item and identifier.
+6. Calculate total-recipe nutrition.
+7. Divide by known servings.
+8. Store unrounded internal values.
+9. Render reasonable rounded values or ranges.
+10. Refuse or defer calculation when major amounts are missing.
+
+Example match record:
+
+{
+  "ingredient_id": "ing_003",
+  "query": "low fat cottage cheese",
+  "selected_name": "Cottage cheese, lowfat, 2% milkfat",
+  "external_id": "...",
+  "grams": 226.0,
+  "match_confidence": 0.87,
+  "manual_override": false
+}
+
+Potential nutrients:
+- Calories
+- Protein
+- Fiber
+- Carbohydrates
+- Fat
+
+Important:
+- Store source nutrition claims separately from calculated nutrition.
+- Do not claim precision that the input does not support.
+- If servings or major quantities are absent, include a document note instead
+  of a fabricated estimate.
+
+======================================================================
+15. GOOGLE AUTHENTICATION AND APIS
+======================================================================
+
+The project targets my personal Google account and personal Google Drive.
+
+Likely APIs:
+- Google Sheets API
+- Google Drive API
+- Google Docs API
+
+Recommended MVP authentication:
+- Installed desktop OAuth flow
+- Store client secrets outside Git
+- Store refresh tokens securely
+- Use least-privilege scopes practical for the application
+- Verify current Google OAuth and API documentation before implementation
+
+Possible Google workflow:
+1. Read new Sheet rows in one batch.
+2. Copy a Google Docs template or create a new Doc.
+3. Rename it.
+4. Place it in a configured Drive folder.
+5. Use one Docs batchUpdate request to replace placeholders and apply structure.
+6. Write doc_id, doc_url, status, and metadata back to the Sheet in one batch.
+
+Do not assume Google API quotas or request formats from this document. Verify
+them against current official Google documentation.
+
+Keep API wrappers isolated:
+- GoogleSheetsClient
+- GoogleDriveClient
+- GoogleDocsClient
+
+Use typed return values and custom exceptions.
+
+======================================================================
+16. DOCUMENT RENDERING
+======================================================================
+
+Prefer copying an existing Google Doc template over constructing all formatting
+from scratch.
+
+Potential approach:
+- Maintain a template_doc_id in config.
+- Copy the template for each recipe.
+- Replace placeholders.
+- Insert shopping-list bullets and numbered steps.
+- Apply bold formatting to component and step labels.
+- Add a source link.
+- Add a visible warning/review section when data is incomplete.
+- Optionally add a footer with processor and schema versions.
+
+Rendering should be deterministic and testable independently from extraction.
+
+Potential intermediate representation:
+
+RenderedRecipe
+- title
+- metadata_lines
+- shopping_sections
+- numbered_steps
+- nutrition_lines
+- notes
+- review_warnings
+
+Then have:
+- render_markdown(recipe) for local/debug output
+- render_google_doc(recipe) for production
+- possibly render_json(recipe) for artifacts/tests
+
+======================================================================
+17. RATE LIMITING, RETRIES, AND ASYNCHRONOUS WORK
+======================================================================
+
+The worker should be resilient rather than highly concurrent.
+
+Recommended personal-scale defaults:
+- One or two recipe jobs at a time
+- Batch Sheet reads and writes
+- One Google Docs batch update per document where practical
+- Exponential backoff with jitter for 429 and retryable 5xx responses
+- Configurable maximum retries
+- No unlimited LLM repair loop
+- Persist intermediate artifacts between stages
+- Mark every stage complete before advancing
+- Use idempotent operations
+- Use a processing lease so stale jobs can be reclaimed
+
+Example state machine:
+
+NEW
+  -> WAITING_FOR_MEDIA, when no accessible media exists
+  -> ACQUIRING
+  -> EXTRACTING
+  -> CLASSIFYING
+  -> STRUCTURING
+  -> VALIDATING
+  -> NUTRITION
+  -> RENDERING
+  -> DONE
+
+Branches:
+- Any stage -> ERROR for actual processing failures
+- VALIDATING -> REVIEW for incomplete/conflicting recipes
+- Any stage -> SKIPPED for duplicate/non-recipe content when configured
+
+Potential lease fields:
+- processing_started_at
+- processing_until
+- worker_id
+
+On startup:
+- Reclaim jobs whose processing_until is in the past.
+- Do not duplicate Docs for jobs that already have a doc_id.
+- Save a content or schema hash for detecting changed source material.
+
+======================================================================
+18. LOCAL WORKER VS. APPS SCRIPT
+======================================================================
+
+Recommended MVP:
+- Python worker running locally on Windows
+- Run manually, continuously, or via Windows Task Scheduler
+- Optional lightweight Apps Script menu may mark selected rows as NEW
+- Do not perform FFmpeg, OCR, transcription, or long LLM work in Apps Script
+
+Potential later deployment:
+- Dockerized worker
+- Cloud Run job or service
+- A managed queue
+- Cloud Storage for temporary artifacts
+- Secret Manager
+- Web UI for review
+
+Do not begin with cloud deployment. First prove the end-to-end local workflow.
+
+======================================================================
+19. RECOMMENDED MVP SCOPE
+======================================================================
+
+Version 0.1 should intentionally be narrow:
+
+- Python package and CLI
+- Local MP4 file supplied manually
+- Filename matched to Instagram shortcode
+- Google Sheet as the job queue
+- Google OAuth
+- FFmpeg audio extraction
+- Local speech transcription
+- Frame sampling and OCR
+- Caption can be manually pasted into a Sheet column if automated retrieval
+  is unavailable
+- Source classification
+- One structured LLM extraction call
+- Pydantic schema validation
+- Deterministic recipe validation
+- Google Doc template copy and placeholder replacement
+- Sheet status and doc URL update
+- No automated arbitrary Instagram login/downloading
+- No nutrition calculation until extraction quality is acceptable
+- Low-confidence recipes go to REVIEW
+
+Success criterion:
+- Process the example rigatoni Reel from a manually supplied video file.
+- Recover spoken process plus visually displayed ingredients/measurements.
+- Use caption text if available.
+- Produce a structured JSON recipe.
+- Create a readable Google Doc.
+- Avoid inventing any missing quantities.
+- Correctly flag unresolved information.
+
+======================================================================
+20. SECURITY AND GIT HYGIENE
+======================================================================
+
+Never commit:
+- Google OAuth client secrets
+- Refresh tokens
+- API keys
+- Browser cookies
+- Downloaded Instagram media
+- Personal Sheet or Drive IDs, unless intentionally placed in a private config
+- Generated recipes containing personal notes, if the repo is public
+
+Suggested .gitignore entries:
+
+.env
+.env.*
+!.env.example
+secrets/
+credentials.json
+token.json
+data/incoming/*
+data/working/*
+data/completed/*
+data/failed/*
+!data/**/.gitkeep
+*.mp4
+*.mov
+*.mkv
+*.mp3
+*.wav
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+Use environment variables or an untracked config override for secrets.
+
+======================================================================
+21. CODING PREFERENCES
+======================================================================
+
+Please help produce maintainable, production-quality Python rather than one
+large script.
+
+Preferences:
+- Python 3.12 or another justified modern version
+- Object-oriented code (inheritance + composition)
+- Type annotations
+- Ruff
+- Pytest
+- Clear interfaces and dependency injection where useful
+- Small, testable modules
+- Explicit error handling
+- Structured logging
+- Retries only around retryable operations
+- No hidden global state
+- Configuration validation at startup
+- Synchronous implementation is acceptable for the MVP
+- Avoid premature async complexity
+- Add async/concurrency only where it produces a clear benefit
+- Pin or constrain dependency versions
+- Document external system setup clearly
+
+I am comfortable reading and modifying nontrivial Python code.
+
+======================================================================
+22. CURRENT DECISIONS
+======================================================================
+
+Decisions already favored:
+- Use Google Sheets as the job queue.
+- Use a local Python worker for the MVP.
+- Use manually supplied/downloaded/screen-recorded video files initially.
+- Keep Instagram acquisition behind an adapter.
+- Extract caption, audio, and on-screen text separately.
+- Use timestamps and provenance.
+- Produce strict JSON before rendering.
+- Validate deterministically.
+- Send incomplete/conflicting recipes to REVIEW.
+- Copy a Google Docs template and use batch updates.
+- Add nutrition only after extraction is reliable.
+- Avoid Apps Script for heavy media/LLM processing.
+- Keep concurrency low.
+- Design every stage to be idempotent and retryable.
+
+======================================================================
+23. OPEN DECISIONS
+======================================================================
+
+Codex should help evaluate and implement these incrementally:
+
+- Exact Sheet schema and header names
+- Exact Pydantic schema
+- Local transcription provider/model
+- OCR provider
+- LLM provider and structured-output method
+- Whether to use SQLite in addition to the Sheet for job state
+- Caption acquisition method
+- Exact Google OAuth scopes
+- Google Docs template-replacement strategy
+- How to represent and preserve human corrections
+- Whether temporary source media should be deleted automatically
+- Nutrition provider and matching approach
+- When to introduce Docker or cloud deployment
+- Whether a lightweight review UI is worthwhile
+
+Any current external API capability, quota, package interface, or terms-of-use
+assumption must be verified against official documentation before coding.
