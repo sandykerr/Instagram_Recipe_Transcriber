@@ -1,15 +1,15 @@
-# WSL Codex Agent Handoff
+# Instagram Recipe Transcriber — Repository Overview
 
 ## Start here
 
-Read this file first, then read [`ai_recipe_automation_codex_handoff.txt`](./ai_recipe_automation_codex_handoff.txt) in full. The original handoff is the authoritative product-requirements document; this file records the environment transition and decisions made in the Windows Codex conversation.
+This is the high-level product and implementation-direction document for the repository. Read it before proposing architecture or making implementation changes.
 
 ## Current repository state
 
 - No application code has been implemented yet.
 - No Python or Node.js project has been scaffolded yet.
 - Instagram scraping and automated media downloading have not been implemented and are explicitly outside the v0.1 scope.
-- The repository currently contains the original handoff and a `test.txt` file.
+- The repository currently contains this overview and a `test.txt` file.
 - Inspect `git status` before changing anything and preserve any user-owned changes.
 
 ## Development environment
@@ -66,7 +66,7 @@ Explicitly defer:
 - worker concurrency
 - a review web application
 
-The first success case is the example rigatoni Reel described in the original handoff, using a manually supplied local video.
+The first success case is the example rigatoni Reel identified during project planning, using a manually supplied local video.
 
 ## Non-negotiable data rules
 
@@ -145,7 +145,7 @@ Branches:
 - Duplicate or confirmed non-recipe inputs may enter `SKIPPED` when configured.
 - Rendering must be idempotent: if a row already has a valid `doc_id`, a retry must not create another document.
 
-Refine the exact state and Sheet schemas before implementation. Do not blindly preserve every proposed column/status from the original handoff if a smaller coherent model will work.
+Refine the exact state and Sheet schemas before implementation. Prefer a smaller coherent model over preserving every proposed column or status when it is not needed.
 
 ## Persistence direction
 
@@ -177,7 +177,7 @@ Favor direct synchronous code. Do not add asyncio or parallel processing for the
 
 ## Next requested task
 
-Before scaffolding or installing dependencies, review the original handoff and propose a concrete v0.1 architecture containing:
+Before scaffolding or installing dependencies, review the requirements in this document and propose a concrete v0.1 architecture containing:
 
 1. Recommended Python version and dependency groups.
 2. Proposed repository structure.
@@ -202,7 +202,7 @@ Verify relevant claims against official primary documentation immediately before
 - Meta/Instagram API capabilities and terms before any future automated acquisition work;
 - USDA FoodData Central API details before the deferred nutrition stage.
 
-Use primary/official sources for technical integration decisions. Do not rely on package/API details remembered from the original handoff.
+Use primary/official sources for technical integration decisions. Do not rely on remembered package or API details.
 
 ## Security and Git hygiene
 
@@ -217,6 +217,6 @@ Never commit:
 
 Check and strengthen `.gitignore` during initial scaffolding. Provide an `.env.example` or sanitized configuration example containing names and descriptions, never real secret values.
 
-## Final note to the WSL agent
+## Final implementation note
 
-The Windows-side conversation performed planning only. There is no partially implemented architecture to preserve. Treat the original handoff as product context and this file as the latest implementation-direction summary. Begin with inspection and architecture discussion, not code generation or dependency installation.
+The Windows-side conversation performed planning only. There is no partially implemented architecture to preserve. Treat this file as the current high-level product and implementation-direction document. Begin with inspection and architecture discussion, not code generation or dependency installation.
