@@ -58,7 +58,6 @@ Build a local, synchronous Python pipeline that:
 
 Explicitly defer:
 
-- Instagram scraping
 - browser-session automation
 - arbitrary Reel downloading
 - nutrition calculation
@@ -174,20 +173,6 @@ Do not add SQLite initially unless design analysis identifies a concrete consist
 - small commits with tests
 
 Favor direct synchronous code. Do not add asyncio or parallel processing for the MVP.
-
-## Next requested task
-
-Before scaffolding or installing dependencies, review the requirements in this document and propose a concrete v0.1 architecture containing:
-
-1. Recommended Python version and dependency groups.
-2. Proposed repository structure.
-3. Exact Google Sheet columns and allowed values.
-4. Initial Pydantic domain models, including evidence/confidence representation.
-5. State-machine transitions and retry/idempotency rules.
-6. A staged implementation plan divided into small commits.
-7. Risks and assumptions requiring verification against current official documentation.
-
-Discuss this proposal with the user before making broad architectural commitments. The user wants to learn from the project, so explain consequential tradeoffs instead of only presenting conclusions.
 
 ## Documentation that must be current before coding integrations
 
