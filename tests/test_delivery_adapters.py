@@ -7,17 +7,28 @@ from pydantic import HttpUrl
 
 from instagram_recipe_transcriber.acquisition import YtDlpAcquirer, recipe_id_for_url
 from instagram_recipe_transcriber.google_adapters import (
+    GoogleDocsRecipeReviewWriter,
     GoogleDocsRecipeWriter,
     GoogleDriveDocumentOrganizer,
     GoogleSheetsRecipeMasterWriter,
     GoogleSheetsRecipeQueueReader,
+    GoogleSheetsRecipeQueueStateWriter,
+    GoogleSheetsRecipeReviewWriter,
+    GoogleSheetsReviewDecisionReader,
 )
 from instagram_recipe_transcriber.models import (
     EvidenceReference,
+    EvidenceSegment,
     Ingredient,
     Instruction,
     QueuedRecipe,
+    QueueStatus,
     RecipeCandidate,
+    RecipeDocumentPresentation,
+    RecipeInstructionFormat,
+    RecipeOutcome,
+    SourceKind,
+    ValidationArtifact,
 )
 
 
@@ -34,6 +45,7 @@ class _Values:
         self._values_by_range = values_by_range
         self.get_calls: list[dict[str, object]] = []
         self.append_calls: list[dict[str, object]] = []
+        self.update_calls: list[dict[str, object]] = []
 
     def get(self, **kwargs: object) -> _Request:
         self.get_calls.append(kwargs)
@@ -43,6 +55,10 @@ class _Values:
 
     def append(self, **kwargs: object) -> _Request:
         self.append_calls.append(kwargs)
+        return _Request({})
+
+    def update(self, **kwargs: object) -> _Request:
+        self.update_calls.append(kwargs)
         return _Request({})
 
 
@@ -133,7 +149,13 @@ def _recipe() -> RecipeCandidate:
 
 def test_queue_reader_returns_the_first_url_from_category_tabs() -> None:
     service = _SheetsService(
-        {"'Desserts'!A2:B": [["", ""], ["https://www.instagram.com/reel/DVJBGzyk8E5/", ""]]}
+        {
+            "'Desserts'!A2:D": [
+                ["", ""],
+                ["https://www.instagram.com/reel/already-published/", "", "published"],
+                ["https://www.instagram.com/reel/DVJBGzyk8E5/", "", ""],
+            ]
+        }
     )
 
     queued = GoogleSheetsRecipeQueueReader(
@@ -142,7 +164,8 @@ def test_queue_reader_returns_the_first_url_from_category_tabs() -> None:
 
     assert queued is not None
     assert queued.category == "Desserts"
-    assert queued.queue_row_number == 3
+    assert queued.queue_row_number == 4
+    assert queued.status is QueueStatus.PENDING
     assert queued.recipe_id == recipe_id_for_url(str(queued.source_url))
 
 
@@ -174,18 +197,125 @@ def test_google_document_drive_and_master_sheet_adapters_write_expected_requests
     ]
 
 
+def test_google_document_writer_can_render_an_approved_raw_transcript() -> None:
+    docs_service = _DocsService()
+
+    GoogleDocsRecipeWriter(docs_service).create(
+        _recipe(),
+        _queued_recipe(),
+        RecipeDocumentPresentation(
+            instruction_format=RecipeInstructionFormat.RAW_TRANSCRIPT,
+            raw_instruction_text="First, combine everything. Then cook it through.",
+        ),
+    )
+
+    text = str(docs_service.documents_api.batch_calls[0])
+    assert "First, combine everything. Then cook it through." in text
+    assert "1. Cook pasta." not in text
+
+
+def test_review_decision_reader_treats_approved_as_accepted() -> None:
+    service = _SheetsService(
+        {
+            "'Desserts'!A2:D": [
+                [
+                    "https://www.instagram.com/reel/DVJBGzyk8E5/",
+                    "Quick pasta",
+                    "Approved",
+                    "https://docs.google.com/document/d/review-doc/edit",
+                ]
+            ]
+        }
+    )
+
+    decision = GoogleSheetsReviewDecisionReader(
+        service,
+        spreadsheet_id="review-sheet",
+        categories=("Desserts",),
+    ).read_next()
+
+    assert decision is not None
+    assert decision.decision.value == "accepted"
+
+
 def test_yt_dlp_acquirer_returns_video_and_caption_metadata(tmp_path: Path) -> None:
     queued = _queued_recipe()
 
     def runner(command: list[str]) -> None:
         output_template = Path(command[command.index("--output") + 1])
         output_dir = output_template.parent
-        (output_dir / "source.mp4").write_bytes(b"video")
-        (output_dir / "source.info.json").write_text(
-            json.dumps({"description": "Caption from Instagram"}), encoding="utf-8"
-        )
+        if "--skip-download" in command:
+            (output_dir / "source.info.json").write_text(
+                json.dumps(
+                    {"description": "Caption from Instagram", "formats": [{"vcodec": "avc1"}]}
+                ),
+                encoding="utf-8",
+            )
+        else:
+            (output_dir / "source.mp4").write_bytes(b"video")
 
     acquired = YtDlpAcquirer(tmp_path, command_runner=runner).acquire(queued)
 
     assert acquired.job.media_path == tmp_path / queued.recipe_id / "source.mp4"
     assert acquired.job.caption_text == "Caption from Instagram"
+
+
+def test_queue_state_writer_updates_status_and_detail_for_the_row() -> None:
+    service = _SheetsService({})
+
+    GoogleSheetsRecipeQueueStateWriter(service, spreadsheet_id="queue-sheet").mark(
+        _queued_recipe(), QueueStatus.PUBLISHED, "https://docs.google.com/document/d/doc-123/edit"
+    )
+
+    assert service.values_api.update_calls == [
+        {
+            "spreadsheetId": "queue-sheet",
+            "range": "'Desserts'!C2:D2",
+            "valueInputOption": "RAW",
+            "body": {
+                "values": [
+                    ["published", "https://docs.google.com/document/d/doc-123/edit"]
+                ]
+            },
+        }
+    ]
+
+
+def test_review_document_and_sheet_writer_preserve_review_context() -> None:
+    queued = _queued_recipe()
+    docs_service = _DocsService()
+    from instagram_recipe_transcriber.models import PipelineResult
+
+    document = GoogleDocsRecipeReviewWriter(docs_service).create(
+        PipelineResult(
+            recipe=_recipe(),
+            validation=ValidationArtifact(outcome=RecipeOutcome.REVIEW),
+            evidence_segments=(
+                EvidenceSegment(
+                    evidence_id="caption-1",
+                    source_kind=SourceKind.CAPTION,
+                    text="Creator caption describing the candidate recipe.",
+                ),
+            ),
+        ),
+        queued,
+    )
+    sheets_service = _SheetsService({})
+    GoogleSheetsRecipeReviewWriter(sheets_service, spreadsheet_id="review-sheet").append(
+        queued, document
+    )
+
+    rendered = str(docs_service.documents_api.batch_calls[0])
+    assert "Validation findings" in rendered
+    assert "caption (caption-1): Creator caption describing the candidate recipe." in rendered
+    assert "OpenAI usage" not in rendered
+    assert sheets_service.values_api.append_calls[0]["body"] == {
+        "values": [
+            [
+                str(queued.source_url),
+                "Quick weeknight recipe",
+                "review",
+                str(document.url),
+            ]
+        ]
+    }

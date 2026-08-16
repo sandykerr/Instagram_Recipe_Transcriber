@@ -16,10 +16,15 @@ from .models import (
     PipelineResult,
     PublicationArtifact,
     QueuedRecipe,
+    QueueStatus,
     RecipeCandidate,
     RecipeDocument,
+    RecipeDocumentPresentation,
     RecipeExtractionArtifact,
     RecipeJob,
+    ReviewArtifact,
+    ReviewDecision,
+    ReviewResolutionArtifact,
     SourceArtifact,
     TranscriptArtifact,
     ValidationArtifact,
@@ -97,15 +102,39 @@ class RecipeQueueReader(Protocol):
     def read_next(self) -> QueuedRecipe | None: ...
 
 
+class RecipeQueueStateWriter(Protocol):
+    """Writes the durable, human-visible state for one queue row."""
+
+    def mark(
+        self,
+        queued_recipe: QueuedRecipe,
+        status: QueueStatus,
+        detail: str | None = None,
+    ) -> None: ...
+
+
 class MediaAcquirer(VersionedComponent, Protocol):
     def acquire(self, queued_recipe: QueuedRecipe) -> AcquiredRecipe: ...
 
 
 class RecipeDocumentWriter(Protocol):
-    def create(self, recipe: RecipeCandidate, queued_recipe: QueuedRecipe) -> RecipeDocument: ...
+    def create(
+        self,
+        recipe: RecipeCandidate,
+        queued_recipe: QueuedRecipe,
+        presentation: RecipeDocumentPresentation | None = None,
+    ) -> RecipeDocument: ...
 
 
 class RecipeMasterWriter(Protocol):
+    def append(self, queued_recipe: QueuedRecipe, document: RecipeDocument) -> None: ...
+
+
+class RecipeReviewDocumentWriter(Protocol):
+    def create(self, result: PipelineResult, queued_recipe: QueuedRecipe) -> RecipeDocument: ...
+
+
+class RecipeReviewWriter(Protocol):
     def append(self, queued_recipe: QueuedRecipe, document: RecipeDocument) -> None: ...
 
 
@@ -121,3 +150,27 @@ class PublicationStore(Protocol):
     def load(self, recipe_id: str) -> PublicationArtifact | None: ...
 
     def save(self, publication: PublicationArtifact) -> None: ...
+
+
+class ReviewStore(Protocol):
+    def load(self, recipe_id: str) -> ReviewArtifact | None: ...
+
+    def save(self, review: ReviewArtifact) -> None: ...
+
+
+class ReviewDecisionReader(Protocol):
+    def read_next(self) -> ReviewDecision | None: ...
+
+
+class ReviewRowRemover(Protocol):
+    def remove(self, decision: ReviewDecision) -> None: ...
+
+
+class RejectedRecipeWriter(Protocol):
+    def append(self, decision: ReviewDecision, document: RecipeDocument) -> None: ...
+
+
+class ReviewResolutionStore(Protocol):
+    def load(self, recipe_id: str) -> ReviewResolutionArtifact | None: ...
+
+    def save(self, resolution: ReviewResolutionArtifact) -> None: ...

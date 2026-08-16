@@ -5,8 +5,12 @@ from pathlib import Path
 from pydantic import HttpUrl
 
 from instagram_recipe_transcriber.models import (
+    EvidenceReference,
     EvidenceSegment,
+    Ingredient,
+    Instruction,
     OcrArtifact,
+    RecipeCandidate,
     RecipeOutcome,
     SourceArtifact,
     SourceKind,
@@ -165,3 +169,106 @@ def test_validator_requires_more_than_one_instruction_for_ready() -> None:
 
     assert validation.outcome is RecipeOutcome.REVIEW
     assert any(finding.code == "insufficient_instructions" for finding in validation.findings)
+
+
+def test_weak_ocr_disagreement_does_not_conflict_with_caption_transcript_agreement() -> None:
+    source = _source().model_copy(
+        update={
+            "caption": EvidenceSegment(
+                evidence_id="caption-1",
+                source_kind=SourceKind.CAPTION,
+                text="15 g parmesan",
+            )
+        }
+    )
+    transcript = TranscriptArtifact(
+        segments=(
+            EvidenceSegment(
+                evidence_id="transcript-1",
+                source_kind=SourceKind.TRANSCRIPT,
+                text="15 g parmesan",
+            ),
+        ),
+        model_name="fake",
+        compute_type="fake",
+    )
+    ocr = OcrArtifact(
+        status="completed",
+        segments=(
+            EvidenceSegment(
+                evidence_id="ocr-1",
+                source_kind=SourceKind.OCR,
+                text="10 g parmesan",
+                confidence=0.35,
+            ),
+        ),
+    )
+
+    recipe = RuleBasedRecipeExtractor().extract(source, transcript, ocr)
+
+    assert recipe.conflicts == ()
+    assert any(
+        reference.evidence_id == "ocr-1"
+        for item in recipe.ingredients
+        for reference in item.evidence
+    )
+
+
+def test_numeric_fat_descriptors_are_names_not_unresolved_quantities() -> None:
+    ocr = OcrArtifact(
+        status="completed",
+        segments=(
+            EvidenceSegment(
+                evidence_id="ocr-1",
+                source_kind=SourceKind.OCR,
+                text="2% blended cottage cheese\n1/3 fat cream cheese",
+                confidence=0.99,
+            ),
+        ),
+    )
+
+    recipe = RuleBasedRecipeExtractor().extract(_source(), _transcript(), ocr)
+    validation = RecipeValidator().validate(recipe)
+
+    assert [ingredient.name for ingredient in recipe.ingredients] == [
+        "2% blended cottage cheese",
+        "1/3 fat cream cheese",
+    ]
+    assert not any(finding.code == "ambiguous_ingredient_name" for finding in validation.findings)
+
+
+def test_creator_unspecified_ingredients_are_allowed_but_empty_recipe_is_not() -> None:
+    reference = EvidenceReference(evidence_id="caption-1")
+    recipe = RecipeCandidate(
+        title="Chicken salad",
+        ingredients=(
+            Ingredient(
+                original_text="cooking spray",
+                name="cooking spray",
+                evidence=(reference,),
+                confidence=0.9,
+            ),
+            Ingredient(
+                original_text="lettuce, tomatoes, onions, and seasoning",
+                name="lettuce, tomatoes, onions, and seasoning",
+                evidence=(reference,),
+                confidence=0.9,
+            ),
+        ),
+        instructions=(
+            Instruction(
+                original_text="Cook the chicken.", sequence=1, evidence=(reference,), confidence=0.9
+            ),
+            Instruction(
+                original_text="Assemble the salad.",
+                sequence=2,
+                evidence=(reference,),
+                confidence=0.9,
+            ),
+        ),
+    )
+
+    validation = RecipeValidator().validate(recipe)
+
+    assert validation.outcome is RecipeOutcome.READY
+    assert not any(finding.code == "missing_quantity" for finding in validation.findings)

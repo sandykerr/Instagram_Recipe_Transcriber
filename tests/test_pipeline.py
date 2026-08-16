@@ -232,6 +232,21 @@ class CaptionReadyValidator:
         return ValidationArtifact(outcome=RecipeOutcome.READY)
 
 
+class CaptionOnlySourceLoader:
+    version = "caption-only-source-v1"
+
+    def load(self, job: RecipeJob) -> SourceArtifact:
+        assert job.media_path is None
+        assert job.caption_text is not None
+        return SourceArtifact(
+            recipe_id=job.recipe_id,
+            source_url=job.source_url,
+            caption=EvidenceSegment(
+                evidence_id="caption-1", source_kind=SourceKind.CAPTION, text=job.caption_text
+            ),
+        )
+
+
 def test_pipeline_stops_before_audio_when_caption_recipe_is_ready(tmp_path: Path) -> None:
     media_path = tmp_path / "input.mp4"
     media_path.write_bytes(b"not a real video")
@@ -263,6 +278,35 @@ def test_pipeline_stops_before_audio_when_caption_recipe_is_ready(tmp_path: Path
     assert extractor.calls == 1
     assert audio_extractor.calls == 0
     assert transcriber.calls == 0
+
+
+def test_caption_only_job_returns_review_when_caption_is_not_ready(tmp_path: Path) -> None:
+    audio_extractor = FakeAudioExtractor()
+    runner = PipelineRunner(
+        artifact_store=JsonArtifactStore(tmp_path / "artifacts"),
+        source_loader=CaptionOnlySourceLoader(),
+        audio_extractor=audio_extractor,
+        transcriber=FakeTranscriber(),
+        ocr_gate=FakeOcrGate(),
+        frame_extractor=FakeFrameExtractor(),
+        ocr_extractor=FakeOcrExtractor(),
+        recipe_extractor=FakeRecipeExtractor(),
+        recipe_validator=FakeValidator(),
+    )
+
+    result = runner.run(
+        RecipeJob(
+            recipe_id="caption-only-incomplete",
+            source_url=HttpUrl("https://www.instagram.com/p/carousel/"),
+            caption_text="A partial recipe",
+        )
+    )
+
+    assert result.validation.outcome is RecipeOutcome.REVIEW
+    assert any(
+        finding.code == "media_fallback_unavailable" for finding in result.validation.findings
+    )
+    assert audio_extractor.calls == 0
 
 
 class TranscriptReadyExtractor:

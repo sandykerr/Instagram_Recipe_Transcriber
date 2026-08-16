@@ -41,6 +41,7 @@ from instagram_recipe_transcriber.models import (
     QueuedRecipe,
     RecipeCandidate,
     RecipeDocument,
+    RecipeDocumentPresentation,
     RecipeExtractionArtifact,
     RecipeOutcome,
     SourceArtifact,
@@ -166,9 +167,14 @@ class CountingDocumentWriter:
         self._delegate = delegate
         self.calls = 0
 
-    def create(self, recipe: RecipeCandidate, queued_recipe: QueuedRecipe) -> RecipeDocument:
+    def create(
+        self,
+        recipe: RecipeCandidate,
+        queued_recipe: QueuedRecipe,
+        presentation: RecipeDocumentPresentation | None = None,
+    ) -> RecipeDocument:
         self.calls += 1
-        return self._delegate.create(recipe, queued_recipe)
+        return self._delegate.create(recipe, queued_recipe, presentation)
 
 
 class CountingDocumentOrganizer:

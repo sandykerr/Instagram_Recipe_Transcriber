@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 
 class StageName(StrEnum):
@@ -33,6 +33,57 @@ class SourceKind(StrEnum):
 class RecipeOutcome(StrEnum):
     READY = "ready"
     REVIEW = "review"
+
+
+class QueueStatus(StrEnum):
+    """Human-visible processing state for an item in the Google Sheets queue."""
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    PUBLISHED = "published"
+    REVIEW = "review"
+    ERROR = "error"
+
+
+class ReviewDecisionStatus(StrEnum):
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
+class ReviewCategory(StrEnum):
+    """Machine-readable reasons a recipe needs human review."""
+
+    INGREDIENTS_MISMATCH = "ingredients_mismatch"
+    INGREDIENTS_AMOUNTS_MISSING = "ingredients_amounts_missing"
+    MISSING_CRITICAL_STEP = "missing_critical_step"
+    MISSING_TITLE = "missing_title"
+    MISSING_INGREDIENTS = "missing_ingredients"
+    MISSING_INSTRUCTIONS = "missing_instructions"
+    SOURCE_CONFLICT = "source_conflict"
+    RECIPE_INCOMPLETE = "recipe_incomplete"
+
+
+class RecipeInstructionFormat(StrEnum):
+    """How instructions are presented in a human-approved final document."""
+
+    NUMBERED_STEPS = "numbered_steps"
+    RAW_TRANSCRIPT = "raw_transcript"
+
+
+class RecipeDocumentPresentation(BaseModel):
+    """Rendering choice kept outside the provider-independent recipe candidate."""
+
+    model_config = ConfigDict(frozen=True)
+
+    instruction_format: RecipeInstructionFormat = RecipeInstructionFormat.NUMBERED_STEPS
+    raw_instruction_text: str | None = None
+
+    @model_validator(mode="after")
+    def require_raw_text_for_transcript_format(self) -> RecipeDocumentPresentation:
+        if self.instruction_format is RecipeInstructionFormat.RAW_TRANSCRIPT:
+            if self.raw_instruction_text is None or not self.raw_instruction_text.strip():
+                raise ValueError("raw_instruction_text is required for raw_transcript format")
+        return self
 
 
 class OcrPolicy(StrEnum):
@@ -86,6 +137,7 @@ class QueuedRecipe(BaseModel):
     category: str = Field(min_length=1)
     queue_row_number: int = Field(ge=2)
     description: str | None = None
+    status: QueueStatus = QueueStatus.PENDING
 
 
 class AcquiredRecipe(BaseModel):
@@ -117,6 +169,46 @@ class PublicationArtifact(BaseModel):
     recipe_id: str = Field(min_length=1)
     document: RecipeDocument
     master_row_written: bool = False
+
+
+class ReviewArtifact(BaseModel):
+    """Recovery state for one review document and its Review Sheet row."""
+
+    model_config = ConfigDict(frozen=True)
+
+    recipe_id: str = Field(min_length=1)
+    document: RecipeDocument
+    recipe: RecipeCandidate | None = None
+    review_categories: tuple[ReviewCategory, ...] = ()
+    transcript_text: str | None = None
+    review_row_written: bool = False
+
+
+class ReviewDecision(BaseModel):
+    """One manual accept/reject action read from a Review Sheet category tab."""
+
+    model_config = ConfigDict(frozen=True)
+
+    recipe_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
+    source_url: HttpUrl
+    category: str = Field(min_length=1)
+    review_row_number: int = Field(ge=2)
+    description: str | None = None
+    decision: ReviewDecisionStatus
+    review_document_url: HttpUrl
+
+
+class ReviewResolutionArtifact(BaseModel):
+    """Recovery state for an accepted or rejected Review Sheet decision."""
+
+    model_config = ConfigDict(frozen=True)
+
+    recipe_id: str = Field(min_length=1)
+    decision: ReviewDecisionStatus
+    document: RecipeDocument
+    master_row_written: bool = False
+    rejected_row_written: bool = False
+    review_row_removed: bool = False
 
 
 class SourceArtifact(BaseModel):
@@ -228,6 +320,16 @@ class Instruction(BaseModel):
     confidence: float = Field(ge=0, le=1)
 
 
+class CompletenessFinding(BaseModel):
+    """An evidence-grounded reason a candidate is unsafe to auto-publish."""
+
+    model_config = ConfigDict(frozen=True)
+
+    code: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+    evidence: tuple[EvidenceReference, ...] = Field(min_length=1)
+
+
 class RecipeCandidate(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -235,6 +337,7 @@ class RecipeCandidate(BaseModel):
     ingredients: tuple[Ingredient, ...] = ()
     instructions: tuple[Instruction, ...] = ()
     conflicts: tuple[str, ...] = ()
+    completeness_findings: tuple[CompletenessFinding, ...] = ()
 
 
 class ApiUsage(BaseModel):
@@ -294,3 +397,4 @@ class PipelineResult(BaseModel):
     recipe: RecipeCandidate
     validation: ValidationArtifact
     recipe_usage: ApiUsage | None = None
+    evidence_segments: tuple[EvidenceSegment, ...] = ()

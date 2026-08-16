@@ -19,6 +19,19 @@ class GoogleWorkflowConfig(BaseModel):
     oauth_token_path: Path
     working_root: Path
     drive_folder_id: str | None = None
+    review_spreadsheet_id: str | None = None
+    review_drive_folder_id: str | None = None
+    rejected_spreadsheet_id: str | None = None
+    rejected_drive_folder_id: str | None = None
+
+    def review_delivery_configured(self) -> bool:
+        return self.review_spreadsheet_id is not None and self.review_drive_folder_id is not None
+
+    def rejection_delivery_configured(self) -> bool:
+        return (
+            self.rejected_spreadsheet_id is not None
+            and self.rejected_drive_folder_id is not None
+        )
 
     @field_validator("category_tabs")
     @classmethod

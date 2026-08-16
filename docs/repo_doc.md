@@ -45,9 +45,10 @@ Do not introduce a TypeScript service, web framework, asynchronous worker, cloud
 
 Build a local, synchronous Python pipeline that:
 
-1. Reads one eligible recipe job at a time from a Google Sheets queue. The
+1. Reads eligible recipe jobs sequentially from a Google Sheets queue. The
    queue has category tabs (for example, Desserts, Snacks, and Main Courses)
-   with a Reel URL and an optional human-readable description in each row.
+   with a Reel URL, optional human-readable description, durable processing
+   status, and optional status detail in each row.
 2. Acquires source media with an optional `yt-dlp` adapter for authorized public Reels, or matches the Instagram URL to a manually supplied local video file, preferably using the Reel shortcode. Local media is the reliable fallback when downloading is unavailable.
 3. Accepts manually pasted caption text when automatic caption acquisition is unavailable.
 4. Extracts audio with FFmpeg and transcribes it locally.
@@ -74,11 +75,11 @@ The first success case is the example rigatoni Reel identified during project pl
 
 ## Google queue and delivery workflow
 
-The first Google-integrated workflow processes only one queue item per run:
+The Google-integrated workflow processes queue items sequentially:
 
 ```text
 Queue Sheet category tab
-  (URL, optional description)
+  (URL, optional description, status, detail)
     -> yt-dlp media download + best-effort caption metadata
     -> caption-first recipe processing pipeline
     -> READY recipe Google Doc
@@ -87,6 +88,52 @@ Queue Sheet category tab
       (recipe title, Google Doc URL)
 ```
 
+Recipes that validate as `REVIEW` follow a separate delivery path:
+
+```text
+Queue Sheet row -> Review Google Doc in the review folder
+                -> matching category tab in the Review Sheet
+                   (URL, description, Review, Review Doc URL)
+```
+
+The Review Sheet uses `Review`, `Approved` (or the legacy `Accepted`), and
+`Rejected` as human-managed decision values. An explicit, separately invoked review-promotion worker
+processes one accepted or rejected row at a time.
+Never append a `REVIEW` item to the Recipe Master Doc automatically.
+
+Each review artifact retains one or more machine-readable review categories;
+the category is separate from the human decision. For example,
+`INGREDIENTS_MISMATCH` and `INGREDIENTS_AMOUNTS_MISSING` can both apply to one
+recipe. `MISSING_CRITICAL_STEP` has a deliberate approval behavior: when a
+human accepts that recipe, the final Doc keeps its ingredients but replaces the
+incomplete numbered candidate steps with the retained raw transcript. This
+makes the evidence available without inventing a complete step list.
+
+`Accepted` creates a clean final Recipe Doc from the locally stored reviewed
+candidate, moves it to the normal output folder, appends the Recipe Master Doc
+row, and then deletes the active Review Sheet row. `Rejected` moves the
+existing Review Doc to the rejected folder, appends a matching row to the
+rejected spreadsheet, and then deletes the active Review Sheet row. Persist a
+local resolution checkpoint before deletion so retries never duplicate Docs,
+Master rows, or rejected rows.
+
+### Implementation update — 2026-08-16
+
+- Implemented review-category persistence. Categories are non-exclusive and
+  include ingredient mismatch, missing ingredient amounts, missing critical
+  steps, missing title/ingredients/instructions, and source conflicts.
+- Review artifacts now retain transcript evidence separately from the recipe
+  candidate. This supports a safe approval path for `MISSING_CRITICAL_STEP`:
+  the final Recipe Doc displays the raw transcript under `Instructions` and
+  intentionally omits the incomplete numbered candidate steps.
+- Added `RecipeDocumentPresentation` so this document-rendering choice remains
+  outside the provider-independent `RecipeCandidate` domain model.
+- The Review Sheet decision reader recognizes both `Approved` and legacy
+  `Accepted` as an approval, plus `Rejected`. Its canonical persisted internal
+  decision is `accepted` or `rejected`.
+- Added unit coverage for multi-category persistence, transcript-based approved
+  rendering, and the `Approved` Review Sheet spelling.
+
 The queue tab name is the authoritative recipe category and must be carried
 unchanged to the matching Recipe Master Doc tab. Do not derive category from
 the recipe title or model output.
@@ -94,9 +141,19 @@ the recipe title or model output.
 For retry safety, persist local publication state after a Doc is created and
 after the Master Sheet row is written. A retry should reuse the recorded Doc
 instead of creating another one whenever a publication checkpoint exists.
-The initial two-column queue has no processing-status column; use persisted
-artifacts and publication state for the first single-item test. Revisit a
-visible queue status column after the workflow is proven.
+Use `Pending`, `Processing`, `Published`, `Review`, and `Error` as the visible
+queue statuses. A blank status is treated as `Pending` so new rows can be
+entered quickly. Only `Pending` and an interrupted `Processing` row are
+eligible; `Published`, `Review`, and `Error` rows are skipped until a person
+changes their status. Store a helpful result detail alongside the status (the
+Google Doc URL for published recipes, validation reason for review, or error
+message for failures). Batch runs are strictly synchronous and may be bounded
+with a maximum item count for an initial safe run.
+
+If a previously failed acquisition becomes processable after an adapter update
+(for example, caption-only carousel support), manually reset its `Error` status
+to blank or `Pending`. The worker does not automatically retry terminal `Error`
+rows, which prevents unintended repeated paid/external work.
 
 ## Future features and optimizations
 
@@ -123,6 +180,12 @@ them only after the single-job local pipeline is reliable and benchmarked.
 - Never invent missing quantities, servings, temperatures, timings, or ingredients.
 - Never infer servings from plates or bowls shown in a video.
 - Preserve exact, approximate, ranged, optional, and `to taste` quantities distinctly.
+- Preserve creator-unspecified ingredients with a null quantity rather than
+  inventing one. This is acceptable for inherently unmeasured items such as
+  cooking spray, lettuce, tomatoes, onions, and seasoning when their original
+  text is supported by evidence. An ingredient line that appears to contain an
+  unparsed numeric quantity, or a recipe missing ingredients/instructions/title,
+  remains a `REVIEW` case.
 - Do not silently resolve conflicts between caption, narration, OCR, or description.
 - Preserve original values when normalized values are added.
 - Every extracted ingredient and instruction must retain evidence references and confidence.
@@ -165,6 +228,12 @@ Run extraction in a cost-aware escalation order: first validate the caption
 alone; if it is `READY`, finish without downloading audio or running speech
 recognition. Otherwise, add the transcript and validate again. Run OCR only
 when that combined result is still not `READY` and the OCR gate requests it.
+
+The structured extraction response must also contain an evidence-grounded
+completeness assessment. It identifies blocking problems such as an
+unquantified core ingredient or a missing critical cooking step; deterministic
+validation routes any such supported finding to `REVIEW`. This assessment is
+not permission to invent facts and does not replace evidence checks.
 
 Evaluate this default against representative fixtures before adding an LLM.
 If testing shows that deterministic extraction produces unacceptably poor

@@ -21,6 +21,7 @@ from .interfaces import (
 )
 from .models import (
     AudioArtifact,
+    EvidenceSegment,
     FrameExtractionArtifact,
     OcrArtifact,
     OcrDecisionArtifact,
@@ -33,6 +34,7 @@ from .models import (
     StageName,
     TranscriptArtifact,
     ValidationArtifact,
+    ValidationFinding,
 )
 
 ArtifactModel = TypeVar("ArtifactModel", bound=BaseModel)
@@ -97,6 +99,21 @@ class PipelineRunner:
                     recipe=caption_extraction.recipe,
                     validation=caption_validation,
                     recipe_usage=caption_extraction.usage,
+                    evidence_segments=_evidence_segments(source, caption_transcript, None),
+                )
+            if source.media_path is None:
+                unavailable = ValidationArtifact(
+                    outcome=RecipeOutcome.REVIEW,
+                    findings=caption_validation.findings
+                    + (
+                        self._fallback_unavailable_finding(),
+                    ),
+                )
+                return PipelineResult(
+                    recipe=caption_extraction.recipe,
+                    validation=unavailable,
+                    recipe_usage=caption_extraction.usage,
+                    evidence_segments=_evidence_segments(source, caption_transcript, None),
                 )
         audio = self._run_stage(
             job,
@@ -122,7 +139,9 @@ class PipelineRunner:
                 recipe=recipe,
                 validation=validation,
                 recipe_usage=extraction.usage,
+                evidence_segments=_evidence_segments(source, transcript, None),
             )
+        ocr: OcrArtifact | None = None
         decision = self._run_stage(
             job,
             StageName.OCR_DECISION,
@@ -159,7 +178,22 @@ class PipelineRunner:
             extraction = self._extract_recipe(job, StageName.RECIPE, source, transcript, ocr)
             recipe = extraction.recipe
             validation = self._validate_recipe(job, StageName.VALIDATION, recipe)
-        return PipelineResult(recipe=recipe, validation=validation, recipe_usage=extraction.usage)
+        return PipelineResult(
+            recipe=recipe,
+            validation=validation,
+            recipe_usage=extraction.usage,
+            evidence_segments=_evidence_segments(source, transcript, ocr),
+        )
+
+    @staticmethod
+    def _fallback_unavailable_finding() -> ValidationFinding:
+        return ValidationFinding(
+            code="media_fallback_unavailable",
+            message=(
+                "Caption extraction was not READY and no media was available "
+                "for transcription or OCR."
+            ),
+        )
 
     def _extract_recipe(
         self,
@@ -225,3 +259,17 @@ class PipelineRunner:
         payload = producer()
         self._artifact_store.save(job.recipe_id, stage.value, input_hash, payload)
         return payload
+
+
+def _evidence_segments(
+    source: SourceArtifact,
+    transcript: TranscriptArtifact,
+    ocr: OcrArtifact | None,
+) -> tuple[EvidenceSegment, ...]:
+    segments: list[EvidenceSegment] = []
+    if source.caption is not None:
+        segments.append(source.caption)
+    segments.extend(transcript.segments)
+    if ocr is not None:
+        segments.extend(ocr.segments)
+    return tuple(segments)

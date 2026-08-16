@@ -12,6 +12,7 @@ from instagram_recipe_transcriber.models import (
     AudioArtifact,
     EvidenceSegment,
     FrameExtractionArtifact,
+    OcrArtifact,
     RecipeCandidate,
     RecipeJob,
     RecipeOutcome,
@@ -23,6 +24,7 @@ from instagram_recipe_transcriber.openai_recipe_extractor import (
     _PROMPT_VERSION,
     _SYSTEM_PROMPT,
     OpenAiRecipeExtractor,
+    _ProposedCompletenessFinding,
     _ProposedIngredient,
     _ProposedInstruction,
     _ProposedRecipe,
@@ -88,9 +90,10 @@ def _transcript() -> TranscriptArtifact:
 
 
 def test_prompt_ignores_emojis_and_non_recipe_metadata() -> None:
-    assert _PROMPT_VERSION == "2"
+    assert _PROMPT_VERSION == "4"
     assert "Ignore emojis completely" in _SYSTEM_PROMPT
     assert "Their presence or omission is not a conflict" in _SYSTEM_PROMPT
+    assert "Low-confidence, malformed" in _SYSTEM_PROMPT
 
 
 def test_openai_extractor_uses_structured_output_and_preserves_evidence() -> None:
@@ -169,6 +172,127 @@ def test_openai_extractor_rejects_hallucinated_or_uncited_claims() -> None:
     assert recipe.instructions == ()
     assert len(recipe.conflicts) == 3
     assert RecipeValidator().validate(recipe).outcome is RecipeOutcome.REVIEW
+
+
+def test_openai_title_accepts_creator_caption_with_punctuation_and_emoji() -> None:
+    source = _source().model_copy(
+        update={
+            "caption": EvidenceSegment(
+                evidence_id="caption-1",
+                source_kind=SourceKind.CAPTION,
+                text="Juicy Chicken-Burger! 🍔\nIngredients: 1 bun",
+            )
+        }
+    )
+    proposal = _ProposedRecipe(
+        title="Juicy Chicken Burger",
+        title_evidence_ids=["caption-1"],
+        ingredients=[],
+        instructions=[],
+        conflicts=[],
+    )
+
+    recipe = OpenAiRecipeExtractor(client=FakeClient(proposal)).extract(source, _transcript(), None)
+
+    assert recipe.title == "Juicy Chicken Burger"
+
+
+def test_openai_ignores_makes_15_vs_weak_ocr_maes_10_conflict() -> None:
+    source = _source().model_copy(
+        update={
+            "caption": EvidenceSegment(
+                evidence_id="caption-1", source_kind=SourceKind.CAPTION, text="Makes 15"
+            )
+        }
+    )
+    transcript = TranscriptArtifact(
+        segments=(
+            EvidenceSegment(
+                evidence_id="transcript-1", source_kind=SourceKind.TRANSCRIPT, text="Makes 15"
+            ),
+        ),
+        model_name="fake",
+        compute_type="fake",
+    )
+    ocr = OcrArtifact(
+        status="completed",
+        segments=(
+            EvidenceSegment(
+                evidence_id="ocr-1",
+                source_kind=SourceKind.OCR,
+                text="MAES 10",
+                confidence=0.3,
+            ),
+        ),
+    )
+    proposal = _ProposedRecipe(
+        title=None,
+        title_evidence_ids=[],
+        ingredients=[],
+        instructions=[],
+        conflicts=["Makes 15 conflicts with OCR MAES 10"],
+    )
+
+    recipe = OpenAiRecipeExtractor(client=FakeClient(proposal)).extract(source, transcript, ocr)
+
+    assert recipe.conflicts == ()
+    assert ocr.segments[0].text == "MAES 10"
+
+
+def test_openai_completeness_assessment_routes_imprecise_burger_to_review() -> None:
+    source = _source().model_copy(
+        update={
+            "caption": EvidenceSegment(
+                evidence_id="caption-1",
+                source_kind=SourceKind.CAPTION,
+                text="Juicy ground chicken burgers",
+            )
+        }
+    )
+    transcript = TranscriptArtifact(
+        segments=(
+            EvidenceSegment(
+                evidence_id="transcript-1",
+                source_kind=SourceKind.TRANSCRIPT,
+                text="Grate a Granny Smith apple and cook the apple and onion.",
+            ),
+            EvidenceSegment(
+                evidence_id="transcript-2",
+                source_kind=SourceKind.TRANSCRIPT,
+                text="Form each patty and chill it before you cook.",
+            ),
+        ),
+        model_name="fake",
+        compute_type="fake",
+    )
+    proposal = _ProposedRecipe(
+        title="Juicy ground chicken burgers",
+        title_evidence_ids=["caption-1"],
+        ingredients=[],
+        instructions=[],
+        conflicts=[],
+        completeness_findings=[
+            _ProposedCompletenessFinding(
+                code="unquantified_core_ingredient",
+                message="Ground chicken has no explicit quantity.",
+                evidence_ids=["caption-1", "transcript-1"],
+            ),
+            _ProposedCompletenessFinding(
+                code="missing_critical_step",
+                message="No supported instruction explains how to cook the burger patties.",
+                evidence_ids=["transcript-2"],
+            ),
+        ],
+    )
+
+    recipe = OpenAiRecipeExtractor(client=FakeClient(proposal)).extract(source, transcript, None)
+    validation = RecipeValidator().validate(recipe)
+
+    assert [finding.code for finding in recipe.completeness_findings] == [
+        "unquantified_core_ingredient",
+        "missing_critical_step",
+    ]
+    assert validation.outcome is RecipeOutcome.REVIEW
 
 
 class _FailingAudioExtractor:
