@@ -59,6 +59,8 @@ class ReviewCategory(StrEnum):
     MISSING_TITLE = "missing_title"
     MISSING_INGREDIENTS = "missing_ingredients"
     MISSING_INSTRUCTIONS = "missing_instructions"
+    SERVINGS_MISSING = "servings_missing"
+    NUTRITION_MISSING = "nutrition_missing"
     SOURCE_CONFLICT = "source_conflict"
     RECIPE_INCOMPLETE = "recipe_incomplete"
 
@@ -77,6 +79,8 @@ class RecipeDocumentPresentation(BaseModel):
 
     instruction_format: RecipeInstructionFormat = RecipeInstructionFormat.NUMBERED_STEPS
     raw_instruction_text: str | None = None
+    servings_text: str | None = None
+    nutrition_notes: str | None = None
 
     @model_validator(mode="after")
     def require_raw_text_for_transcript_format(self) -> RecipeDocumentPresentation:
@@ -196,6 +200,8 @@ class ReviewDecision(BaseModel):
     description: str | None = None
     decision: ReviewDecisionStatus
     review_document_url: HttpUrl
+    servings_text: str | None = None
+    nutrition_notes: str | None = None
 
 
 class ReviewResolutionArtifact(BaseModel):

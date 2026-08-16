@@ -64,6 +64,7 @@ class TrackedDocumentWriter:
         queued_recipe: QueuedRecipe,
         presentation: RecipeDocumentPresentation | None = None,
     ) -> RecipeDocument:
+        print(f"Creating final Recipe Doc for {queued_recipe.recipe_id}...")
         self.calls += 1
         return self._delegate.create(recipe, queued_recipe, presentation)
 
@@ -74,6 +75,7 @@ class TrackedOrganizer:
         self.calls = 0
 
     def move_to_folder(self, document: RecipeDocument) -> RecipeDocument:
+        print(f"Moving Doc {document.document_id} to its destination folder...")
         self.calls += 1
         return self._delegate.move_to_folder(document)
 
@@ -84,6 +86,7 @@ class TrackedMasterWriter:
         self.calls = 0
 
     def append(self, queued_recipe: QueuedRecipe, document: RecipeDocument) -> None:
+        print(f"Appending {queued_recipe.recipe_id} to Recipe Master Sheet...")
         self.calls += 1
         self._delegate.append(queued_recipe, document)
 
@@ -94,6 +97,7 @@ class TrackedRejectedWriter:
         self.calls = 0
 
     def append(self, decision: ReviewDecision, document: RecipeDocument) -> None:
+        print(f"Appending {decision.recipe_id} to the Rejected Sheet...")
         self.calls += 1
         self._delegate.append(decision, document)
 
@@ -104,6 +108,7 @@ class TrackedRowRemover:
         self.calls = 0
 
     def remove(self, decision: ReviewDecision) -> None:
+        print(f"Removing {decision.recipe_id} from the active Review Sheet...")
         self.calls += 1
         self._delegate.remove(decision)
 
@@ -214,6 +219,7 @@ def main() -> None:
     preflight(config, execute_writes=args.execute_writes)
     services = GoogleOAuthServiceFactory(config).create_services()
     decision = read_one_decision(config, services.sheets)
+    print(f"Selected {decision.decision.value} review row for {decision.recipe_id}.")
 
     review_store = JsonReviewStore(config.working_root / "review-publication")
     review = review_store.load(decision.recipe_id)
@@ -276,6 +282,7 @@ def main() -> None:
     )
 
     started = time.perf_counter()
+    print("Promoting selected review row...")
     first = workflow.process_next()
     first_elapsed = time.perf_counter() - started
     assert first is not None
@@ -317,6 +324,7 @@ def main() -> None:
     saves_after_first = resolution_store.save_calls
     checkpoint_after_first = checkpoint_path.read_bytes()
     started = time.perf_counter()
+    print("Verifying retry uses the persisted resolution without external writes...")
     second = workflow.process_next()
     retry_elapsed = time.perf_counter() - started
     assert second == first

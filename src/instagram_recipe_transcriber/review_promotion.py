@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pydantic import BaseModel, ConfigDict
+
 from .interfaces import (
     DocumentOrganizer,
     PublicationStore,
@@ -20,9 +22,22 @@ from .models import (
     RecipeInstructionFormat,
     ReviewArtifact,
     ReviewCategory,
+    ReviewDecision,
     ReviewDecisionStatus,
     ReviewResolutionArtifact,
 )
+
+
+class ReviewPromotionBatchResult(BaseModel):
+    """Results from one bounded, sequential manual-review promotion run."""
+
+    model_config = ConfigDict(frozen=True)
+
+    resolutions: tuple[ReviewResolutionArtifact, ...] = ()
+
+    @property
+    def processed_count(self) -> int:
+        return len(self.resolutions)
 
 
 class ReviewPromotionWorkflow:
@@ -76,7 +91,7 @@ class ReviewPromotionWorkflow:
                         self._document_writer.create(
                             review.recipe,
                             queued,
-                            _approved_presentation(review),
+                            _approved_presentation(review, decision),
                         )
                     )
                     publication = PublicationArtifact(
@@ -125,17 +140,48 @@ class ReviewPromotionWorkflow:
             self._resolution_store.save(resolution)
         return resolution
 
+    def process_all(
+        self, *, max_items: int | None = None
+    ) -> ReviewPromotionBatchResult:
+        """Process approved/rejected rows sequentially, stopping when none remain.
 
-def _approved_presentation(review: ReviewArtifact) -> RecipeDocumentPresentation | None:
-    """Use the retained transcript only for an approved missing-step review."""
+        Errors deliberately stop the batch. The unresolved row remains in the
+        Review Sheet and its checkpoint preserves any completed work for a safe
+        retry; continuing would otherwise repeatedly select that same row.
+        """
 
-    if ReviewCategory.MISSING_CRITICAL_STEP not in review.review_categories:
+        if max_items is not None and max_items < 1:
+            raise ValueError("max_items must be at least 1")
+        resolutions: list[ReviewResolutionArtifact] = []
+        while max_items is None or len(resolutions) < max_items:
+            resolution = self.process_next()
+            if resolution is None:
+                break
+            resolutions.append(resolution)
+        return ReviewPromotionBatchResult(resolutions=tuple(resolutions))
+
+
+def _approved_presentation(
+    review: ReviewArtifact, decision: ReviewDecision
+) -> RecipeDocumentPresentation | None:
+    """Apply manual review fields and raw-transcript instructions when needed."""
+
+    uses_raw_transcript = ReviewCategory.MISSING_CRITICAL_STEP in review.review_categories
+    if not uses_raw_transcript and not decision.servings_text and not decision.nutrition_notes:
         return None
-    if review.transcript_text is None or not review.transcript_text.strip():
+    if uses_raw_transcript and (
+        review.transcript_text is None or not review.transcript_text.strip()
+    ):
         raise ValueError(
             "Cannot approve a missing-critical-step review without a retained transcript"
         )
     return RecipeDocumentPresentation(
-        instruction_format=RecipeInstructionFormat.RAW_TRANSCRIPT,
-        raw_instruction_text=review.transcript_text,
+        instruction_format=(
+            RecipeInstructionFormat.RAW_TRANSCRIPT
+            if uses_raw_transcript
+            else RecipeInstructionFormat.NUMBERED_STEPS
+        ),
+        raw_instruction_text=review.transcript_text if uses_raw_transcript else None,
+        servings_text=decision.servings_text,
+        nutrition_notes=decision.nutrition_notes,
     )

@@ -93,13 +93,23 @@ Recipes that validate as `REVIEW` follow a separate delivery path:
 ```text
 Queue Sheet row -> Review Google Doc in the review folder
                 -> matching category tab in the Review Sheet
-                   (URL, description, Review, Review Doc URL)
+                   (URL, description, Review, Review Doc URL, Servings,
+                    Nutrition Notes)
 ```
 
 The Review Sheet uses `Review`, `Approved` (or the legacy `Accepted`), and
 `Rejected` as human-managed decision values. An explicit, separately invoked review-promotion worker
-processes one accepted or rejected row at a time.
+processes accepted or rejected rows sequentially.
 Never append a `REVIEW` item to the Recipe Master Doc automatically.
+
+The Review and Rejected Sheets have two optional manual fields after `Review
+Doc URL`: `Servings` and `Nutrition Notes`. A reviewer can enter creator-stated
+or manually checked values there. Approval renders them in the final Recipe Doc
+and rejection preserves them in the Rejected Sheet. Automatic publication
+requires creator-stated servings, calories, protein, carbs, and fat; their
+absence routes an otherwise complete candidate to `REVIEW` for manual entry.
+Structured serving and nutrition extraction remains a future improvement; do
+not infer or calculate these values in the MVP.
 
 Each review artifact retains one or more machine-readable review categories;
 the category is separate from the human decision. For example,
@@ -116,6 +126,10 @@ existing Review Doc to the rejected folder, appends a matching row to the
 rejected spreadsheet, and then deletes the active Review Sheet row. Persist a
 local resolution checkpoint before deletion so retries never duplicate Docs,
 Master rows, or rejected rows.
+
+Use the review-promotion batch operation with a small `--max-items` value
+first. Unlimited review processing is available only through `--all` together
+with an explicit `--confirm-all` acknowledgement and `--execute-writes`.
 
 ### Implementation update — 2026-08-16
 

@@ -152,7 +152,7 @@ class GoogleSheetsRecipeReviewWriter:
                 .values()
                 .append(
                     spreadsheetId=self._spreadsheet_id,
-                    range=_queue_range(queued_recipe.category),
+                    range=_review_range(queued_recipe.category),
                     valueInputOption="RAW",
                     insertDataOption="INSERT_ROWS",
                     body={
@@ -162,6 +162,8 @@ class GoogleSheetsRecipeReviewWriter:
                                 queued_recipe.description or "",
                                 QueueStatus.REVIEW.value,
                                 str(document.url),
+                                "",
+                                "",
                             ]
                         ]
                     },
@@ -189,7 +191,7 @@ class GoogleSheetsReviewDecisionReader:
             categories=self._categories,
         )
         for category in self._categories:
-            for row_number, row in enumerate(reader._get_values(_queue_range(category)), start=2):
+            for row_number, row in enumerate(reader._get_values(_review_range(category)), start=2):
                 if len(row) < 4:
                     continue
                 decision = _review_decision(row[2])
@@ -208,6 +210,8 @@ class GoogleSheetsReviewDecisionReader:
                     description=row[1].strip() or None,
                     decision=decision,
                     review_document_url=HttpUrl(detail),
+                    servings_text=_optional_cell(row, 4),
+                    nutrition_notes=_optional_cell(row, 5),
                 )
         return None
 
@@ -269,7 +273,7 @@ class GoogleSheetsRejectedRecipeWriter:
                 .values()
                 .append(
                     spreadsheetId=self._spreadsheet_id,
-                    range=_queue_range(decision.category),
+                    range=_review_range(decision.category),
                     valueInputOption="RAW",
                     insertDataOption="INSERT_ROWS",
                     body={
@@ -279,6 +283,8 @@ class GoogleSheetsRejectedRecipeWriter:
                                 decision.description or "",
                                 ReviewDecisionStatus.REJECTED.value,
                                 str(document.url),
+                                decision.servings_text or "",
+                                decision.nutrition_notes or "",
                             ]
                         ]
                     },
@@ -395,6 +401,10 @@ def _queue_range(category: str) -> str:
     return f"{_a1_tab(category)}!A2:D"
 
 
+def _review_range(category: str) -> str:
+    return f"{_a1_tab(category)}!A2:F"
+
+
 def _queue_state_range(category: str, row_number: int) -> str:
     return f"{_a1_tab(category)}!C{row_number}:D{row_number}"
 
@@ -432,6 +442,12 @@ def _review_decision(value: str) -> ReviewDecisionStatus | None:
     return None
 
 
+def _optional_cell(row: list[str], index: int) -> str | None:
+    if len(row) <= index:
+        return None
+    return row[index].strip() or None
+
+
 def _render(
     recipe: RecipeCandidate,
     queued_recipe: QueuedRecipe,
@@ -442,6 +458,10 @@ def _render(
         lines.extend([f"Queue description: {queued_recipe.description}", ""])
     lines.extend(["", "Ingredients"])
     lines.extend(f"- {ingredient.original_text}" for ingredient in recipe.ingredients)
+    if presentation is not None and presentation.servings_text:
+        lines.extend(["", "Servings", presentation.servings_text])
+    if presentation is not None and presentation.nutrition_notes:
+        lines.extend(["", "Nutrition (manual)", presentation.nutrition_notes])
     lines.extend(["", "Instructions"])
     if (
         presentation is not None

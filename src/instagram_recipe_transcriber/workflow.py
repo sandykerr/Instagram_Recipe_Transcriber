@@ -215,6 +215,10 @@ def _review_categories(pipeline_result: PipelineResult) -> tuple[ReviewCategory,
             categories.add(ReviewCategory.MISSING_INGREDIENTS)
         elif code in {"missing_instructions", "missing_steps"}:
             categories.add(ReviewCategory.MISSING_INSTRUCTIONS)
+        elif code == "missing_servings":
+            categories.add(ReviewCategory.SERVINGS_MISSING)
+        elif code in {"missing_calories", "missing_macros"}:
+            categories.add(ReviewCategory.NUTRITION_MISSING)
         elif code in {"source_conflict", "evidence_conflict"}:
             categories.add(
                 ReviewCategory.INGREDIENTS_MISMATCH

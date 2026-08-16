@@ -104,6 +104,12 @@ class _CategorizedReviewPipeline:
                     ValidationFinding(
                         code="unquantified_core_ingredient", message="Chicken has no amount"
                     ),
+                    ValidationFinding(
+                        code="missing_calories", message="No creator-stated calories"
+                    ),
+                    ValidationFinding(
+                        code="missing_servings", message="No creator-stated servings"
+                    ),
                 ),
             ),
             evidence_segments=(
@@ -315,6 +321,8 @@ def test_review_delivery_persists_multiple_categories_and_transcript(tmp_path: P
     assert result.review.review_categories == (
         ReviewCategory.INGREDIENTS_AMOUNTS_MISSING,
         ReviewCategory.MISSING_CRITICAL_STEP,
+        ReviewCategory.NUTRITION_MISSING,
+        ReviewCategory.SERVINGS_MISSING,
     )
     assert result.review.transcript_text == "Cook the chicken until done."
 

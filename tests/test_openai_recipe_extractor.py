@@ -90,9 +90,11 @@ def _transcript() -> TranscriptArtifact:
 
 
 def test_prompt_ignores_emojis_and_non_recipe_metadata() -> None:
-    assert _PROMPT_VERSION == "4"
+    assert _PROMPT_VERSION == "5"
     assert "Ignore emojis completely" in _SYSTEM_PROMPT
-    assert "Their presence or omission is not a conflict" in _SYSTEM_PROMPT
+    assert "Return missing_servings" in _SYSTEM_PROMPT
+    assert "Return missing_calories" in _SYSTEM_PROMPT
+    assert "Return missing_macros" in _SYSTEM_PROMPT
     assert "Low-confidence, malformed" in _SYSTEM_PROMPT
 
 
@@ -282,6 +284,21 @@ def test_openai_completeness_assessment_routes_imprecise_burger_to_review() -> N
                 message="No supported instruction explains how to cook the burger patties.",
                 evidence_ids=["transcript-2"],
             ),
+            _ProposedCompletenessFinding(
+                code="missing_servings",
+                message="No creator-stated serving count is present.",
+                evidence_ids=["caption-1"],
+            ),
+            _ProposedCompletenessFinding(
+                code="missing_calories",
+                message="No creator-stated calorie value is present.",
+                evidence_ids=["caption-1"],
+            ),
+            _ProposedCompletenessFinding(
+                code="missing_macros",
+                message="Creator-stated protein, carbs, and fat are incomplete.",
+                evidence_ids=["caption-1"],
+            ),
         ],
     )
 
@@ -291,6 +308,9 @@ def test_openai_completeness_assessment_routes_imprecise_burger_to_review() -> N
     assert [finding.code for finding in recipe.completeness_findings] == [
         "unquantified_core_ingredient",
         "missing_critical_step",
+        "missing_servings",
+        "missing_calories",
+        "missing_macros",
     ]
     assert validation.outcome is RecipeOutcome.REVIEW
 

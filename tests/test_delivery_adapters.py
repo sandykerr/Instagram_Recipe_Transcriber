@@ -14,6 +14,7 @@ from instagram_recipe_transcriber.google_adapters import (
     GoogleSheetsRecipeQueueReader,
     GoogleSheetsRecipeQueueStateWriter,
     GoogleSheetsRecipeReviewWriter,
+    GoogleSheetsRejectedRecipeWriter,
     GoogleSheetsReviewDecisionReader,
 )
 from instagram_recipe_transcriber.models import (
@@ -24,9 +25,12 @@ from instagram_recipe_transcriber.models import (
     QueuedRecipe,
     QueueStatus,
     RecipeCandidate,
+    RecipeDocument,
     RecipeDocumentPresentation,
     RecipeInstructionFormat,
     RecipeOutcome,
+    ReviewDecision,
+    ReviewDecisionStatus,
     SourceKind,
     ValidationArtifact,
 )
@@ -214,15 +218,34 @@ def test_google_document_writer_can_render_an_approved_raw_transcript() -> None:
     assert "1. Cook pasta." not in text
 
 
+def test_google_document_writer_renders_manual_servings_and_nutrition_notes() -> None:
+    docs_service = _DocsService()
+
+    GoogleDocsRecipeWriter(docs_service).create(
+        _recipe(),
+        _queued_recipe(),
+        RecipeDocumentPresentation(
+            servings_text="4",
+            nutrition_notes="Per serving — 338 kcal | Protein 22 g",
+        ),
+    )
+
+    text = str(docs_service.documents_api.batch_calls[0])
+    assert "Servings\\n4" in text
+    assert "Nutrition (manual)\\nPer serving — 338 kcal | Protein 22 g" in text
+
+
 def test_review_decision_reader_treats_approved_as_accepted() -> None:
     service = _SheetsService(
         {
-            "'Desserts'!A2:D": [
+            "'Desserts'!A2:F": [
                 [
                     "https://www.instagram.com/reel/DVJBGzyk8E5/",
                     "Quick pasta",
                     "Approved",
                     "https://docs.google.com/document/d/review-doc/edit",
+                    "4",
+                    "Per serving — 338 kcal | Protein 22 g",
                 ]
             ]
         }
@@ -236,6 +259,8 @@ def test_review_decision_reader_treats_approved_as_accepted() -> None:
 
     assert decision is not None
     assert decision.decision.value == "accepted"
+    assert decision.servings_text == "4"
+    assert decision.nutrition_notes == "Per serving — 338 kcal | Protein 22 g"
 
 
 def test_yt_dlp_acquirer_returns_video_and_caption_metadata(tmp_path: Path) -> None:
@@ -316,6 +341,44 @@ def test_review_document_and_sheet_writer_preserve_review_context() -> None:
                 "Quick weeknight recipe",
                 "review",
                 str(document.url),
+                "",
+                "",
+            ]
+        ]
+    }
+
+
+def test_rejected_writer_preserves_manual_servings_and_nutrition_notes() -> None:
+    sheets_service = _SheetsService({})
+    decision = ReviewDecision(
+        recipe_id="queued-recipe",
+        source_url=_queued_recipe().source_url,
+        category="Desserts",
+        review_row_number=2,
+        decision=ReviewDecisionStatus.REJECTED,
+        review_document_url=HttpUrl("https://docs.google.com/document/d/review/edit"),
+        servings_text="4",
+        nutrition_notes="Per serving — 338 kcal",
+    )
+
+    GoogleSheetsRejectedRecipeWriter(sheets_service, spreadsheet_id="rejected-sheet").append(
+        decision,
+        RecipeDocument(
+            document_id="review-doc",
+            title="REVIEW — Quick pasta",
+            url=HttpUrl("https://docs.google.com/document/d/review-doc/edit"),
+        ),
+    )
+
+    assert sheets_service.values_api.append_calls[0]["body"] == {
+        "values": [
+            [
+                str(decision.source_url),
+                "",
+                "rejected",
+                "https://docs.google.com/document/d/review-doc/edit",
+                "4",
+                "Per serving — 338 kcal",
             ]
         ]
     }

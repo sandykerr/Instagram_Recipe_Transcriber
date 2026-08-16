@@ -6,6 +6,7 @@ from instagram_recipe_transcriber.models import (
     EvidenceReference,
     Ingredient,
     Instruction,
+    PublicationArtifact,
     QueuedRecipe,
     RecipeCandidate,
     RecipeDocument,
@@ -15,6 +16,7 @@ from instagram_recipe_transcriber.models import (
     ReviewCategory,
     ReviewDecision,
     ReviewDecisionStatus,
+    ReviewResolutionArtifact,
 )
 from instagram_recipe_transcriber.review_promotion import ReviewPromotionWorkflow
 
@@ -33,6 +35,14 @@ class _DecisionReader:
 
     def read_next(self) -> ReviewDecision:
         return self.decision
+
+
+class _ListDecisionReader:
+    def __init__(self, decisions: list[ReviewDecision]) -> None:
+        self._decisions = decisions
+
+    def read_next(self) -> ReviewDecision | None:
+        return self._decisions.pop(0) if self._decisions else None
 
 
 class _Store:
@@ -127,6 +137,28 @@ def _review() -> ReviewArtifact:
     )
 
 
+class _RecipeStore:
+    def __init__(self, reviews: dict[str, ReviewArtifact]) -> None:
+        self.reviews = reviews
+
+    def load(self, recipe_id: str) -> ReviewArtifact | None:
+        return self.reviews.get(recipe_id)
+
+    def save(self, review: ReviewArtifact) -> None:
+        self.reviews[review.recipe_id] = review
+
+
+class _ArtifactStore:
+    def __init__(self) -> None:
+        self.values: dict[str, object] = {}
+
+    def load(self, recipe_id: str) -> object | None:
+        return self.values.get(recipe_id)
+
+    def save(self, value: PublicationArtifact | ReviewResolutionArtifact) -> None:
+        self.values[value.recipe_id] = value
+
+
 def test_accepted_review_creates_one_final_document_master_row_and_removes_review_row() -> None:
     review_store = _Store(_review())
     resolution_store = _Store()
@@ -188,11 +220,11 @@ def test_accepted_missing_critical_step_uses_raw_transcript_not_candidate_steps(
     workflow = ReviewPromotionWorkflow(
         decision_reader=_DecisionReader(_decision(ReviewDecisionStatus.ACCEPTED)),
         review_store=_Store(review),  # type: ignore[arg-type]
-        resolution_store=_Store(),  # type: ignore[arg-type]
+        resolution_store=_ArtifactStore(),  # type: ignore[arg-type]
         review_row_remover=_Remover(),
         document_writer=writer,
         master_writer=_Appender(),
-        publication_store=_Store(),  # type: ignore[arg-type]
+        publication_store=_ArtifactStore(),  # type: ignore[arg-type]
         accepted_document_organizer=_Organizer(),
         rejected_document_organizer=_Organizer(),
         rejected_writer=_Appender(),
@@ -206,3 +238,66 @@ def test_accepted_missing_critical_step_uses_raw_transcript_not_candidate_steps(
             raw_instruction_text="Mix the ingredients, then cook until done.",
         )
     ]
+
+
+def test_accepted_review_carries_manual_servings_and_nutrition_notes() -> None:
+    writer = _Writer()
+    decision = _decision(ReviewDecisionStatus.ACCEPTED).model_copy(
+        update={
+            "servings_text": "4",
+            "nutrition_notes": "Per serving — 338 kcal | Protein 22 g",
+        }
+    )
+    workflow = ReviewPromotionWorkflow(
+        decision_reader=_DecisionReader(decision),
+        review_store=_Store(_review()),  # type: ignore[arg-type]
+        resolution_store=_ArtifactStore(),  # type: ignore[arg-type]
+        review_row_remover=_Remover(),
+        document_writer=writer,
+        master_writer=_Appender(),
+        publication_store=_ArtifactStore(),  # type: ignore[arg-type]
+        accepted_document_organizer=_Organizer(),
+        rejected_document_organizer=_Organizer(),
+        rejected_writer=_Appender(),
+    )
+
+    workflow.process_next()
+
+    assert writer.presentations == [
+        RecipeDocumentPresentation(
+            servings_text="4",
+            nutrition_notes="Per serving — 338 kcal | Protein 22 g",
+        )
+    ]
+
+
+def test_process_all_promotes_a_bounded_number_of_review_decisions() -> None:
+    first = _decision(ReviewDecisionStatus.ACCEPTED)
+    second = first.model_copy(update={"recipe_id": "second-review", "review_row_number": 3})
+    first_review = _review()
+    second_review = first_review.model_copy(update={"recipe_id": second.recipe_id})
+    writer, master, rejected, remover = _Writer(), _Appender(), _Appender(), _Remover()
+    workflow = ReviewPromotionWorkflow(
+        decision_reader=_ListDecisionReader([first, second]),
+        review_store=_RecipeStore(
+            {first.recipe_id: first_review, second.recipe_id: second_review}
+        ),
+        resolution_store=_ArtifactStore(),  # type: ignore[arg-type]
+        review_row_remover=remover,
+        document_writer=writer,
+        master_writer=master,
+        publication_store=_ArtifactStore(),  # type: ignore[arg-type]
+        accepted_document_organizer=_Organizer(),
+        rejected_document_organizer=_Organizer(),
+        rejected_writer=rejected,
+    )
+
+    result = workflow.process_all(max_items=2)
+
+    assert result.processed_count == 2
+    assert [resolution.recipe_id for resolution in result.resolutions] == [
+        first.recipe_id,
+        second.recipe_id,
+    ]
+    assert writer.calls == master.calls == remover.calls == 2
+    assert rejected.calls == 0

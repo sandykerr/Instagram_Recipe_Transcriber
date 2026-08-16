@@ -225,6 +225,7 @@ data/working/
 *.info.json
 download.json
 tests/data/
+**.csv
 
 # API keys
 keys.txt

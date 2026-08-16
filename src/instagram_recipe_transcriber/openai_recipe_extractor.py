@@ -26,7 +26,7 @@ from .models import (
 )
 from .openai_usage import OpenAiUsageTracker
 
-_PROMPT_VERSION = "4"
+_PROMPT_VERSION = "5"
 _SYSTEM_PROMPT = """Extract a recipe only from the supplied evidence segments.
 
 Return a proposed structured recipe. Every original_text value must be copied verbatim
@@ -51,11 +51,19 @@ the evidence lacks an essential preparation or final cooking/baking/serving step
 example, formed burger patties without a supported instruction to cook them). Cite the
 evidence that establishes the incomplete context. Do not invent missing values.
 
+Automatic publication also requires creator-stated serving and nutrition information.
+Return missing_servings when no explicit recipe yield or serving count is present.
+Return missing_calories when no explicit calorie value is present. Return missing_macros
+when any of protein, carbohydrates/carbs, or fat is absent. These are completeness
+findings only: do not extract nutrition into recipe fields yet. For an absence finding,
+cite the evidence segment that establishes the recipe context; never claim a value that
+is not present.
+
 Ignore emojis completely: do not include them in extracted fields and do not mention
-them in conflicts. Also ignore macros, calories, protein counts, serving counts,
-marketing text, and optional tips unless they are explicitly needed as an ingredient
-quantity or an instruction. Their presence or omission is not a conflict. Use the
-evidence order for instruction order."""
+them in conflicts. Do not include macros, calories, protein counts, or serving counts
+in recipe fields. Marketing text and optional tips are not recipe fields unless they
+are explicitly needed as an ingredient quantity or an instruction. Use the evidence
+order for instruction order."""
 
 
 class _ProposedIngredient(BaseModel):
