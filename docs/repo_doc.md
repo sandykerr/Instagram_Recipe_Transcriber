@@ -8,7 +8,8 @@ This is the high-level product and implementation-direction document for the rep
 
 - No application code has been implemented yet.
 - No Python or Node.js project has been scaffolded yet.
-- Instagram scraping and automated media downloading have not been implemented and are explicitly outside the v0.1 scope.
+- Instagram scraping has not been implemented and is outside the v0.1 scope.
+- `yt-dlp` has been smoke-tested as an optional, best-effort adapter for downloading authorized public Reels without cookies. It is not a guaranteed acquisition mechanism; manually supplied local media remains the required fallback.
 - The repository currently contains this overview and a `test.txt` file.
 - Inspect `git status` before changing anything and preserve any user-owned changes.
 
@@ -44,8 +45,10 @@ Do not introduce a TypeScript service, web framework, asynchronous worker, cloud
 
 Build a local, synchronous Python pipeline that:
 
-1. Reads eligible recipe jobs from a Google Sheet.
-2. Matches each Instagram URL to a manually supplied local video file, preferably using the Reel shortcode.
+1. Reads one eligible recipe job at a time from a Google Sheets queue. The
+   queue has category tabs (for example, Desserts, Snacks, and Main Courses)
+   with a Reel URL and an optional human-readable description in each row.
+2. Acquires source media with an optional `yt-dlp` adapter for authorized public Reels, or matches the Instagram URL to a manually supplied local video file, preferably using the Reel shortcode. Local media is the reliable fallback when downloading is unavailable.
 3. Accepts manually pasted caption text when automatic caption acquisition is unavailable.
 4. Extracts audio with FFmpeg and transcribes it locally.
 5. Samples/deduplicates frames and extracts on-screen text with OCR.
@@ -54,18 +57,66 @@ Build a local, synchronous Python pipeline that:
 8. Produces a strict structured recipe with evidence and confidence metadata.
 9. Runs deterministic validation.
 10. Sends incomplete or conflicting recipes to `REVIEW` rather than treating them as processing errors.
-11. Copies/renders a Google Docs template and writes the resulting Doc URL and state back to the Sheet.
+11. Creates a Google Doc containing each `READY` recipe, optionally moves it
+    to a configured Drive folder, and appends its title and Doc URL to the
+    matching category tab in the Recipe Master Doc spreadsheet.
 
 Explicitly defer:
 
 - browser-session automation
-- arbitrary Reel downloading
+- authenticated, arbitrary, or guaranteed Reel downloading
 - nutrition calculation
 - cloud deployment
 - worker concurrency
 - a review web application
 
 The first success case is the example rigatoni Reel identified during project planning, using a manually supplied local video.
+
+## Google queue and delivery workflow
+
+The first Google-integrated workflow processes only one queue item per run:
+
+```text
+Queue Sheet category tab
+  (URL, optional description)
+    -> yt-dlp media download + best-effort caption metadata
+    -> caption-first recipe processing pipeline
+    -> READY recipe Google Doc
+    -> optional Drive-folder placement
+    -> matching Recipe Master Doc category tab
+      (recipe title, Google Doc URL)
+```
+
+The queue tab name is the authoritative recipe category and must be carried
+unchanged to the matching Recipe Master Doc tab. Do not derive category from
+the recipe title or model output.
+
+For retry safety, persist local publication state after a Doc is created and
+after the Master Sheet row is written. A retry should reuse the recorded Doc
+instead of creating another one whenever a publication checkpoint exists.
+The initial two-column queue has no processing-status column; use persisted
+artifacts and publication state for the first single-item test. Revisit a
+visible queue status column after the workflow is proven.
+
+## Future features and optimizations
+
+These are intentional follow-on options, not v0.1 requirements. Re-evaluate
+them only after the single-job local pipeline is reliable and benchmarked.
+
+- **Cloud migration:** package the synchronous worker for a small Linux VM so
+  batches can run remotely. For the expected low volume (about 20–30 Reels per
+  month), favor an x86 VM that is started for batch processing and stopped
+  afterward over an always-on worker, serverless architecture, or GPU. Account
+  for persistent storage, networking, and API costs; configure cost alerts
+  before deployment. Benchmark the selected transcription and OCR dependencies
+  on the exact cloud image before committing to a provider or instance size.
+- **Concurrency:** consider only after profiling demonstrates a bottleneck and
+  job idempotency, artifact locking, and external-service rate limits are
+  proven.
+- **Review UI:** add a human-review application only if Sheet-based review is
+  insufficient.
+- **Nutrition:** support a clearly separated calculated-nutrition stage only
+  after the recipe-extraction pipeline is reliable.
 
 ## Non-negotiable data rules
 
@@ -86,7 +137,7 @@ Use a package-oriented synchronous design with small interfaces around external 
 - `GoogleSheetsClient`
 - `GoogleDriveClient`
 - `GoogleDocsClient`
-- `MediaAcquirer`, initially implemented only by `LocalFileAcquirer`
+- `MediaAcquirer`, implemented initially by `LocalFileAcquirer` and an optional best-effort `YtDlpAcquirer`
 - `AudioExtractor`
 - `Transcriber`
 - `FrameExtractor`
@@ -97,6 +148,35 @@ Use a package-oriented synchronous design with small interfaces around external 
 - `RecipeRenderer`
 
 Use composition and dependency injection where they make tests easier. Avoid an inheritance hierarchy merely for architectural appearance.
+
+## Recipe extraction strategy
+
+Use a hybrid extraction design that defaults to deterministic, evidence-first parsing:
+
+1. Rule-based extraction identifies likely ingredient lines, quantities, units,
+   timings, temperatures, headings, and instruction steps from the separately
+   preserved caption, transcript, and OCR artifacts.
+2. Deterministic validation checks that each structured claim is supported by
+   evidence and that no source conflicts remain unresolved.
+3. Missing, ambiguous, or conflicting content is routed to `REVIEW`; it must
+   not be filled with inferred values.
+
+Run extraction in a cost-aware escalation order: first validate the caption
+alone; if it is `READY`, finish without downloading audio or running speech
+recognition. Otherwise, add the transcript and validate again. Run OCR only
+when that combined result is still not `READY` and the OCR gate requests it.
+
+Evaluate this default against representative fixtures before adding an LLM.
+If testing shows that deterministic extraction produces unacceptably poor
+structure or excessive review cases, add an optional OpenAI API-backed
+`RecipeExtractor` adapter as a fallback. Use the API's structured-output
+capability with the recipe schema, but treat its response as a proposed
+structure, not a source of facts: validation must reject any claim lacking an
+evidence reference or introducing a new value. Keep the provider, model,
+prompt version, input-artifact hashes, and provider-reported usage metadata in
+the extraction artifact. Usage records request and token counts only; calculate
+mutable model pricing in a separate reporting layer. API credentials must
+remain in untracked configuration.
 
 Each pipeline stage should:
 

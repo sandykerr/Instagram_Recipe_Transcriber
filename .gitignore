@@ -217,8 +217,17 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Data
-**/.mp4
-**/.json
-tests/data
-**-frames
+# Local data and generated pipeline artifacts (sanitized fixtures remain tracked).
+data/working/
+*.mp4
+*-frames/
+*-ocr*.json
+*.info.json
+download.json
+tests/data/
+
+# API keys
+keys.txt
+google_oauth_client.json
+google_oauth_token.json
+google_workflow_config.json

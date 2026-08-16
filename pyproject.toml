@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "instagram-recipe-transcriber"
+version = "0.1.0"
+description = "Local-first, evidence-backed Instagram recipe transcription pipeline."
+requires-python = ">=3.12"
+dependencies = [
+    "google-api-python-client>=2.0,<3",
+    "google-auth-httplib2>=0.2,<1",
+    "google-auth-oauthlib>=1.0,<2",
+    "openai>=2,<3",
+    "pydantic>=2.13,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.19,<2",
+    "pytest>=9,<10",
+    "ruff>=0.15,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-q"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src"]
+extend-exclude = ["tests/scripts/component_smoke_tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = ["src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/instagram_recipe_transcriber"]
