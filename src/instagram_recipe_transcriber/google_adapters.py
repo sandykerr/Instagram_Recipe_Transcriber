@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import HttpUrl
@@ -314,18 +315,9 @@ class GoogleDocsRecipeWriter:
         try:
             created = self._service.documents().create(body={"title": recipe.title}).execute()
             document_id = created["documentId"]
+            rendered = _render(recipe, queued_recipe, presentation)
             self._service.documents().batchUpdate(
-                documentId=document_id,
-                body={
-                    "requests": [
-                        {
-                            "insertText": {
-                                "endOfSegmentLocation": {},
-                                "text": _render(recipe, queued_recipe, presentation),
-                            }
-                        }
-                    ]
-                },
+                documentId=document_id, body={"requests": rendered.requests()}
             ).execute()
         except Exception as error:
             raise PipelineOperationalError("Cannot create the recipe Google Doc") from error
@@ -347,18 +339,9 @@ class GoogleDocsRecipeReviewWriter:
         try:
             created = self._service.documents().create(body={"title": title}).execute()
             document_id = created["documentId"]
+            rendered = _render_review(result, queued_recipe)
             self._service.documents().batchUpdate(
-                documentId=document_id,
-                body={
-                    "requests": [
-                        {
-                            "insertText": {
-                                "endOfSegmentLocation": {},
-                                "text": _render_review(result, queued_recipe),
-                            }
-                        }
-                    ]
-                },
+                documentId=document_id, body={"requests": rendered.requests()}
             ).execute()
         except Exception as error:
             raise PipelineOperationalError("Cannot create the recipe review Google Doc") from error
@@ -448,72 +431,194 @@ def _optional_cell(row: list[str], index: int) -> str | None:
     return row[index].strip() or None
 
 
+@dataclass(frozen=True)
+class _ParagraphStyleRange:
+    start_offset: int
+    end_offset: int
+    named_style_type: str
+
+
+@dataclass(frozen=True)
+class _TextStyleRange:
+    start_offset: int
+    end_offset: int
+
+
+@dataclass(frozen=True)
+class _RenderedDocument:
+    text: str
+    paragraph_styles: tuple[_ParagraphStyleRange, ...]
+    bold_ranges: tuple[_TextStyleRange, ...]
+
+    def requests(self) -> list[dict[str, object]]:
+        requests: list[dict[str, object]] = [
+            {"insertText": {"endOfSegmentLocation": {}, "text": self.text}}
+        ]
+        requests.extend(
+            {
+                "updateParagraphStyle": {
+                    "range": self._docs_range(style.start_offset, style.end_offset),
+                    "paragraphStyle": {"namedStyleType": style.named_style_type},
+                    "fields": "namedStyleType",
+                }
+            }
+            for style in self.paragraph_styles
+        )
+        requests.extend(
+            {
+                "updateTextStyle": {
+                    "range": self._docs_range(style.start_offset, style.end_offset),
+                    "textStyle": {"bold": True},
+                    "fields": "bold",
+                }
+            }
+            for style in self.bold_ranges
+        )
+        return requests
+
+    def _docs_range(self, start_offset: int, end_offset: int) -> dict[str, int]:
+        return {
+            "startIndex": 1 + _utf16_length(self.text[:start_offset]),
+            "endIndex": 1 + _utf16_length(self.text[:end_offset]),
+        }
+
+
+class _DocumentRenderBuilder:
+    def __init__(self) -> None:
+        self._lines: list[str] = []
+        self._paragraph_styles: list[_ParagraphStyleRange] = []
+        self._bold_ranges: list[_TextStyleRange] = []
+        self._offset = 0
+
+    def line(
+        self,
+        text: str = "",
+        *,
+        named_style_type: str | None = None,
+        bold_prefix_length: int = 0,
+        bold_prefix_start_offset: int = 0,
+    ) -> None:
+        start_offset = self._offset
+        self._lines.append(text + "\n")
+        self._offset += len(text) + 1
+        if named_style_type is not None:
+            self._paragraph_styles.append(
+                _ParagraphStyleRange(start_offset, self._offset, named_style_type)
+            )
+        if bold_prefix_length:
+            self._bold_ranges.append(
+                _TextStyleRange(
+                    start_offset + bold_prefix_start_offset,
+                    start_offset + bold_prefix_start_offset + bold_prefix_length,
+                )
+            )
+
+    def build(self) -> _RenderedDocument:
+        return _RenderedDocument(
+            text="".join(self._lines),
+            paragraph_styles=tuple(self._paragraph_styles),
+            bold_ranges=tuple(self._bold_ranges),
+        )
+
+
+def _utf16_length(text: str) -> int:
+    """Return the UTF-16 code-unit count used by Google Docs text indices."""
+
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _render(
     recipe: RecipeCandidate,
     queued_recipe: QueuedRecipe,
     presentation: RecipeDocumentPresentation | None = None,
-) -> str:
-    lines = [recipe.title or "Untitled recipe", "", f"Source: {queued_recipe.source_url}"]
+) -> _RenderedDocument:
+    builder = _DocumentRenderBuilder()
+    builder.line(recipe.title or "Untitled recipe", named_style_type="HEADING_1")
+    builder.line()
+    builder.line(f"Source: {queued_recipe.source_url}")
     if queued_recipe.description:
-        lines.extend([f"Queue description: {queued_recipe.description}", ""])
-    lines.extend(["", "Ingredients"])
-    lines.extend(f"- {ingredient.original_text}" for ingredient in recipe.ingredients)
+        builder.line(f"Queue description: {queued_recipe.description}")
+    builder.line()
+    builder.line("Ingredients", named_style_type="HEADING_2")
+    for ingredient in recipe.ingredients:
+        builder.line(f"- {ingredient.original_text}")
     if presentation is not None and presentation.servings_text:
-        lines.extend(["", "Servings", presentation.servings_text])
+        builder.line()
+        builder.line(
+            f"Servings: {presentation.servings_text}", bold_prefix_length=len("Servings:")
+        )
     if presentation is not None and presentation.nutrition_notes:
-        lines.extend(["", "Nutrition (manual)", presentation.nutrition_notes])
-    lines.extend(["", "Instructions"])
+        builder.line()
+        nutrition_label = "Nutrition (manual):"
+        builder.line(
+            f"{nutrition_label} {presentation.nutrition_notes}",
+            bold_prefix_length=len(nutrition_label),
+        )
+    builder.line()
+    builder.line("Instructions", named_style_type="HEADING_2")
     if (
         presentation is not None
         and presentation.instruction_format is RecipeInstructionFormat.RAW_TRANSCRIPT
     ):
         assert presentation.raw_instruction_text is not None
-        lines.append(presentation.raw_instruction_text)
+        builder.line(presentation.raw_instruction_text)
     else:
-        lines.extend(
-            f"{instruction.sequence}. {instruction.original_text}"
-            for instruction in recipe.instructions
-        )
-    return "\n".join(lines) + "\n"
+        for instruction in recipe.instructions:
+            builder.line(f"{instruction.sequence}. {instruction.original_text}")
+    return builder.build()
 
 
-def _render_review(result: PipelineResult, queued_recipe: QueuedRecipe) -> str:
-    lines = [
-        "Recipe review",
-        "",
-        f"Source: {queued_recipe.source_url}",
-        f"Category: {queued_recipe.category}",
-    ]
+def _render_review(result: PipelineResult, queued_recipe: QueuedRecipe) -> _RenderedDocument:
+    builder = _DocumentRenderBuilder()
+    builder.line("Recipe review", named_style_type="HEADING_1")
+    builder.line()
+    builder.line(f"Source: {queued_recipe.source_url}")
+    builder.line(f"Category: {queued_recipe.category}")
     if queued_recipe.description:
-        lines.append(f"Queue description: {queued_recipe.description}")
-    lines.extend(["", "Validation findings"])
-    lines.extend(f"- [{finding.code}] {finding.message}" for finding in result.validation.findings)
-    lines.extend(["", "Candidate title", result.recipe.title or "(no supported title)"])
-    lines.extend(["", "Ingredients"])
-    lines.extend(f"- {ingredient.original_text}" for ingredient in result.recipe.ingredients)
-    lines.extend(["", "Instructions"])
-    lines.extend(
-        f"{instruction.sequence}. {instruction.original_text}"
-        for instruction in result.recipe.instructions
-    )
+        builder.line(f"Queue description: {queued_recipe.description}")
+    builder.line()
+    builder.line("Validation findings", named_style_type="HEADING_2")
+    for finding in result.validation.findings:
+        builder.line(f"- [{finding.code}] {finding.message}")
+    builder.line()
+    builder.line("Candidate title", named_style_type="HEADING_2")
+    builder.line(result.recipe.title or "(no supported title)")
+    builder.line()
+    builder.line("Ingredients", named_style_type="HEADING_2")
+    for ingredient in result.recipe.ingredients:
+        builder.line(f"- {ingredient.original_text}")
+    builder.line()
+    builder.line("Instructions", named_style_type="HEADING_2")
+    for instruction in result.recipe.instructions:
+        builder.line(f"{instruction.sequence}. {instruction.original_text}")
     if result.recipe.conflicts:
-        lines.extend(["", "Unresolved conflicts"])
-        lines.extend(f"- {conflict}" for conflict in result.recipe.conflicts)
+        builder.line()
+        builder.line("Unresolved conflicts", named_style_type="HEADING_2")
+        for conflict in result.recipe.conflicts:
+            builder.line(f"- {conflict}")
     if result.recipe.completeness_findings:
-        lines.extend(["", "Completeness findings"])
-        lines.extend(
-            f"- [{finding.code}] {finding.message}"
-            for finding in result.recipe.completeness_findings
-        )
-    lines.extend(["", "Evidence excerpts"])
+        builder.line()
+        builder.line("Completeness findings", named_style_type="HEADING_2")
+        for completeness_finding in result.recipe.completeness_findings:
+            builder.line(
+                f"- [{completeness_finding.code}] {completeness_finding.message}"
+            )
+    builder.line()
+    builder.line("Evidence excerpts", named_style_type="HEADING_2")
     if not result.evidence_segments:
-        lines.append("- No source excerpts were retained for this result.")
+        builder.line("- No source excerpts were retained for this result.")
     else:
-        lines.extend(_render_evidence(segment) for segment in result.evidence_segments)
-    return "\n".join(lines) + "\n"
+        for segment in result.evidence_segments:
+            evidence_label, excerpt = _render_evidence(segment)
+            builder.line(
+                f"- {evidence_label} {excerpt}",
+                bold_prefix_start_offset=2,
+                bold_prefix_length=len(evidence_label),
+            )
+    return builder.build()
 
 
-def _render_evidence(segment: EvidenceSegment) -> str:
+def _render_evidence(segment: EvidenceSegment) -> tuple[str, str]:
     text = " ".join(segment.text.split())
     excerpt = text if len(text) <= 1_000 else text[:997] + "..."
-    return f"- {segment.source_kind.value} ({segment.evidence_id}): {excerpt}"
+    return f"{segment.source_kind.value} ({segment.evidence_id}):", excerpt

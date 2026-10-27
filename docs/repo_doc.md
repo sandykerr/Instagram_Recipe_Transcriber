@@ -111,6 +111,13 @@ absence routes an otherwise complete candidate to `REVIEW` for manual entry.
 Structured serving and nutrition extraction remains a future improvement; do
 not infer or calculate these values in the MVP.
 
+Google Docs use named heading styles for document titles and major sections.
+Published Docs use `HEADING_1` for the recipe name and `HEADING_2` for
+Ingredients and Instructions; manual servings and nutrition labels are bold
+normal text. Review Docs use `HEADING_1` for Recipe review and `HEADING_2` for
+their review sections. Each evidence source label is bold through its colon,
+while the quoted excerpt remains normal text.
+
 Each review artifact retains one or more machine-readable review categories;
 the category is separate from the human decision. For example,
 `INGREDIENTS_MISMATCH` and `INGREDIENTS_AMOUNTS_MISSING` can both apply to one

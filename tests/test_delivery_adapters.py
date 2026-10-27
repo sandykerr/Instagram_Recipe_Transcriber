@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 from pydantic import HttpUrl
 
@@ -97,6 +98,12 @@ class _DocsService:
 
     def documents(self) -> _Documents:
         return self.documents_api
+
+
+def _document_requests(service: _DocsService) -> list[dict[str, Any]]:
+    batch_call = cast(dict[str, Any], service.documents_api.batch_calls[0])
+    body = cast(dict[str, Any], batch_call["body"])
+    return cast(list[dict[str, Any]], body["requests"])
 
 
 class _Files:
@@ -216,6 +223,13 @@ def test_google_document_writer_can_render_an_approved_raw_transcript() -> None:
     text = str(docs_service.documents_api.batch_calls[0])
     assert "First, combine everything. Then cook it through." in text
     assert "1. Cook pasta." not in text
+    requests = _document_requests(docs_service)
+    paragraph_styles = [
+        request["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"]
+        for request in requests
+        if "updateParagraphStyle" in request
+    ]
+    assert paragraph_styles == ["HEADING_1", "HEADING_2", "HEADING_2"]
 
 
 def test_google_document_writer_renders_manual_servings_and_nutrition_notes() -> None:
@@ -231,8 +245,16 @@ def test_google_document_writer_renders_manual_servings_and_nutrition_notes() ->
     )
 
     text = str(docs_service.documents_api.batch_calls[0])
-    assert "Servings\\n4" in text
-    assert "Nutrition (manual)\\nPer serving — 338 kcal | Protein 22 g" in text
+    assert "Servings: 4" in text
+    assert "Nutrition (manual): Per serving — 338 kcal | Protein 22 g" in text
+    requests = _document_requests(docs_service)
+    bold_requests = [
+        request["updateTextStyle"]
+        for request in requests
+        if "updateTextStyle" in request
+    ]
+    assert len(bold_requests) == 2
+    assert all(request["textStyle"] == {"bold": True} for request in bold_requests)
 
 
 def test_review_decision_reader_treats_approved_as_accepted() -> None:
@@ -334,6 +356,29 @@ def test_review_document_and_sheet_writer_preserve_review_context() -> None:
     assert "Validation findings" in rendered
     assert "caption (caption-1): Creator caption describing the candidate recipe." in rendered
     assert "OpenAI usage" not in rendered
+    requests = _document_requests(docs_service)
+    heading_styles = [
+        request["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"]
+        for request in requests
+        if "updateParagraphStyle" in request
+    ]
+    assert heading_styles == [
+        "HEADING_1",
+        "HEADING_2",
+        "HEADING_2",
+        "HEADING_2",
+        "HEADING_2",
+        "HEADING_2",
+    ]
+    evidence_style = next(
+        request["updateTextStyle"] for request in requests if "updateTextStyle" in request
+    )
+    evidence_range = evidence_style["range"]
+    inserted_text = requests[0]["insertText"]["text"]
+    assert (
+        inserted_text[evidence_range["startIndex"] - 1 : evidence_range["endIndex"] - 1]
+        == "caption (caption-1):"
+    )
     assert sheets_service.values_api.append_calls[0]["body"] == {
         "values": [
             [
