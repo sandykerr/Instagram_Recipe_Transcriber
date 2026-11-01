@@ -108,7 +108,10 @@ def _setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sheets: Sheets) -> t
         if slug == "resolve":
             JsonReviewResolutionStore(config.working_root / "review-resolution").save(
                 ReviewResolutionArtifact(
-                    recipe_id=recipe_id, document=document, decision=ReviewDecisionStatus.ACCEPTED
+                    recipe_id=recipe_id,
+                    document=document,
+                    decision=ReviewDecisionStatus.ACCEPTED,
+                    master_row_written=True,
                 )
             )
     command = _command()
@@ -198,3 +201,32 @@ def test_command_refuses_conflicts_and_malformed_rows_before_any_write(
         assert "conflict=1" in output.out
         assert "missing_checkpoint" in output.out
         assert recipe_id_for_url("https://example.com/no-checkpoint") in output.out
+
+
+@pytest.mark.parametrize("decision", list(ReviewDecisionStatus))
+def test_command_incomplete_resolution_blocks_even_unrelated_append(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    decision: ReviewDecisionStatus,
+) -> None:
+    sheets = Sheets()
+    command, config_path = _setup(tmp_path, monkeypatch, sheets)
+    store = JsonReviewResolutionStore(tmp_path / "work" / "review-resolution")
+    recipe_id = recipe_id_for_url("https://example.com/resolve")
+    resolution = store.load(recipe_id)
+    assert resolution is not None
+    store.save(
+        resolution.model_copy(
+            update={
+                "decision": decision,
+                "master_row_written": False,
+                "rejected_row_written": False,
+            }
+        )
+    )
+
+    assert command.main(["--config", str(config_path), "--execute-writes"]) != 0
+
+    assert sheets.mutations == []
+    assert "Planned: append=1 remove=0 update=0 conflict=1" in capsys.readouterr().out

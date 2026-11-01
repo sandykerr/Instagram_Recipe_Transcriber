@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 from pydantic import HttpUrl
 
+from instagram_recipe_transcriber.errors import PipelineOperationalError
+from instagram_recipe_transcriber.google_adapters import GoogleSheetsReviewSyncApplier
 from instagram_recipe_transcriber.models import (
     EvidenceReference,
     Ingredient,
@@ -24,6 +26,12 @@ from instagram_recipe_transcriber.models import (
 )
 from instagram_recipe_transcriber.publication import JsonReviewResolutionStore
 from instagram_recipe_transcriber.review_promotion import ReviewPromotionWorkflow
+from instagram_recipe_transcriber.review_sync import (
+    ActiveReviewRow,
+    ReviewQueueRow,
+    ReviewSyncPlan,
+    ReviewSyncPlanner,
+)
 
 
 def _document(identifier: str, title: str) -> RecipeDocument:
@@ -453,3 +461,123 @@ def test_failed_review_row_removal_does_not_update_queue(tmp_path: Path) -> None
     assert not checkpoint.review_row_removed
     assert not checkpoint.queue_row_updated
     assert queue.updates == []
+
+
+@pytest.mark.parametrize("decision_status", list(ReviewDecisionStatus))
+def test_destination_failure_blocks_sync_until_promotion_retry_completes(
+    tmp_path: Path, decision_status: ReviewDecisionStatus
+) -> None:
+    decision = _decision(decision_status)
+    resolution_root = tmp_path / "resolutions"
+
+    class LiveReviewQueue:
+        def __init__(self) -> None:
+            self.queue = ReviewQueueRow(
+                recipe_id=decision.recipe_id,
+                source_url=decision.source_url,
+                category=decision.category,
+                queue_row_number=2,
+                status=QueueStatus.REVIEW,
+            )
+            self.active = (
+                ActiveReviewRow(
+                    recipe_id=decision.recipe_id,
+                    source_url=decision.source_url,
+                    category=decision.category,
+                    review_row_number=decision.review_row_number,
+                    review_document_url=decision.review_document_url,
+                ),
+            )
+
+        def read_next(self) -> ReviewDecision | None:
+            return decision if self.active else None
+
+        def remove(self, resolved: ReviewDecision) -> None:
+            assert resolved == decision
+            self.active = ()
+
+        def resolve(self, resolved: ReviewDecision, status: QueueStatus, detail: str) -> None:
+            assert resolved == decision
+            self.queue = self.queue.model_copy(update={"status": status, "detail": detail})
+
+    class FailingOnceDestination:
+        def __init__(self) -> None:
+            self.attempts = 0
+            self.documents: list[RecipeDocument] = []
+
+        def append(self, source: QueuedRecipe | ReviewDecision, document: RecipeDocument) -> None:
+            assert source.recipe_id == decision.recipe_id
+            self.attempts += 1
+            if self.attempts == 1:
+                raise PipelineOperationalError("Destination append failed")
+            self.documents.append(document)
+
+    live = LiveReviewQueue()
+    destination = FailingOnceDestination()
+    writer = _Writer()
+    publication_store = _ArtifactStore()
+
+    def build_workflow() -> ReviewPromotionWorkflow:
+        return ReviewPromotionWorkflow(
+            decision_reader=live,
+            review_store=_RecipeStore({decision.recipe_id: _review()}),
+            resolution_store=JsonReviewResolutionStore(resolution_root),
+            review_row_remover=live,
+            queue_state_writer=live,
+            document_writer=writer,
+            master_writer=destination
+            if decision_status is ReviewDecisionStatus.ACCEPTED
+            else _Appender(),
+            publication_store=publication_store,  # type: ignore[arg-type]
+            accepted_document_organizer=_Organizer(),
+            rejected_document_organizer=_Organizer(),
+            rejected_writer=destination
+            if decision_status is ReviewDecisionStatus.REJECTED
+            else _Appender(),
+        )
+
+    with pytest.raises(PipelineOperationalError, match="Destination append failed"):
+        build_workflow().process_next()
+
+    checkpoint = JsonReviewResolutionStore(resolution_root).load(decision.recipe_id)
+    assert checkpoint is not None
+    assert not checkpoint.master_row_written and not checkpoint.rejected_row_written
+    assert not checkpoint.review_row_removed and not checkpoint.queue_row_updated
+    before = (live.queue, live.active)
+    blocked = ReviewSyncPlanner(reviews={}, resolutions={decision.recipe_id: checkpoint}).plan(
+        (live.queue,), live.active
+    )
+    assert [conflict.reason.value for conflict in blocked.conflicts] == ["incomplete_resolution"]
+    assert blocked.appends == blocked.removals == blocked.queue_updates == ()
+    with pytest.raises(PipelineOperationalError, match="conflicts"):
+        GoogleSheetsReviewSyncApplier(
+            object(), queue_spreadsheet_id="input", review_spreadsheet_id="review"
+        ).apply(blocked)
+    assert (live.queue, live.active) == before
+    assert live.read_next() == decision
+    assert destination.documents == []
+
+    result = build_workflow().process_next()
+
+    assert result is not None and result.review_row_removed and result.queue_row_updated
+    assert result.master_row_written is (decision_status is ReviewDecisionStatus.ACCEPTED)
+    assert result.rejected_row_written is (decision_status is ReviewDecisionStatus.REJECTED)
+    assert destination.attempts == 2
+    assert destination.documents == [result.document]
+    assert writer.calls == (1 if decision_status is ReviewDecisionStatus.ACCEPTED else 0)
+    assert live.read_next() is None
+    assert live.queue.status is (
+        QueueStatus.PUBLISHED
+        if decision_status is ReviewDecisionStatus.ACCEPTED
+        else QueueStatus.REJECTED
+    )
+    assert live.queue.detail == str(result.document.url)
+    checkpoint = JsonReviewResolutionStore(resolution_root).load(decision.recipe_id)
+    assert checkpoint == result
+    assert (
+        ReviewSyncPlanner(reviews={}, resolutions={decision.recipe_id: checkpoint}).plan(
+            (live.queue,), live.active
+        )
+        == ReviewSyncPlan()
+    )
+    assert build_workflow().process_next() is None

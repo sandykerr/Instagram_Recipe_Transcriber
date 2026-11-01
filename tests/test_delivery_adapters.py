@@ -44,7 +44,9 @@ from instagram_recipe_transcriber.models import (
 from instagram_recipe_transcriber.review_sync import (
     ActiveReviewRow,
     ReviewRemovalAction,
+    ReviewSyncConflictReason,
     ReviewSyncPlan,
+    ReviewSyncPlanner,
 )
 
 
@@ -200,6 +202,40 @@ def test_sync_snapshot_reads_every_tab_and_preserves_row_numbers() -> None:
     assert (
         not service.values_api.append_calls + service.values_api.update_calls + service.batch_calls
     )
+
+
+def test_sync_snapshot_preserves_conflicting_terminal_detail_exactly() -> None:
+    detail = "https://example.com/final-doc "
+    service = _SheetsService(
+        {
+            "'Desserts'!A2:D": [["https://example.com/pasta", "", "Published", detail]],
+            "'Desserts'!A2:F": [],
+        }
+    )
+    queue, active = google_adapters.GoogleSheetsReviewSyncSnapshotReader(
+        service,
+        queue_spreadsheet_id="input",
+        review_spreadsheet_id="review",
+        categories=("Desserts",),
+    ).read()
+    resolution = ReviewResolutionArtifact(
+        recipe_id=recipe_id_for_url("https://example.com/pasta"),
+        decision=ReviewDecisionStatus.ACCEPTED,
+        document=RecipeDocument(
+            document_id="final", title="Final", url=HttpUrl("https://example.com/final-doc")
+        ),
+        master_row_written=True,
+    )
+
+    plan = ReviewSyncPlanner(reviews={}, resolutions={resolution.recipe_id: resolution}).plan(
+        queue, active
+    )
+
+    assert queue[0].detail == detail
+    assert [conflict.reason for conflict in plan.conflicts] == [
+        ReviewSyncConflictReason.QUEUE_STATE_MISMATCH
+    ]
+    assert plan.appends == plan.removals == plan.queue_updates == ()
 
 
 @pytest.mark.parametrize(
@@ -416,9 +452,7 @@ def test_google_document_writer_renders_manual_servings_and_nutrition_notes() ->
     assert "Nutrition (manual): Per serving — 338 kcal | Protein 22 g" in text
     requests = _document_requests(docs_service)
     bold_requests = [
-        request["updateTextStyle"]
-        for request in requests
-        if "updateTextStyle" in request
+        request["updateTextStyle"] for request in requests if "updateTextStyle" in request
     ]
     assert len(bold_requests) == 2
     assert all(request["textStyle"] == {"bold": True} for request in bold_requests)
@@ -486,11 +520,7 @@ def test_queue_state_writer_updates_status_and_detail_for_the_row() -> None:
             "spreadsheetId": "queue-sheet",
             "range": "'Desserts'!C2:D2",
             "valueInputOption": "RAW",
-            "body": {
-                "values": [
-                    ["published", "https://docs.google.com/document/d/doc-123/edit"]
-                ]
-            },
+            "body": {"values": [["published", "https://docs.google.com/document/d/doc-123/edit"]]},
         }
     ]
 
@@ -558,6 +588,105 @@ def test_review_queue_writer_requires_exactly_one_match_before_updating(
 
     with pytest.raises(PipelineOperationalError):
         writer.resolve(_review_decision(), QueueStatus.PUBLISHED, "Resolved document URL")
+
+    assert service.values_api.update_calls == []
+
+
+@pytest.mark.parametrize("status", [QueueStatus.PUBLISHED, QueueStatus.REJECTED])
+@pytest.mark.parametrize(
+    "current",
+    ["", "   ", "Pending", "Processing", "Error", "unknown", "Published", "Rejected"],
+)
+def test_review_queue_writer_refuses_protected_or_conflicting_input_status_without_writes(
+    status: QueueStatus, current: str
+) -> None:
+    service = _SheetsService(
+        {"'Chef''s Desserts'!A2:D": [[str(_review_decision().source_url), "", current, "old"]]}
+    )
+
+    with pytest.raises(PipelineOperationalError):
+        GoogleSheetsReviewQueueStateWriter(service, spreadsheet_id="queue-sheet").resolve(
+            _review_decision(), status, "Resolved document URL"
+        )
+
+    assert service.values_api.update_calls == []
+
+
+@pytest.mark.parametrize("status", [QueueStatus.PUBLISHED, QueueStatus.REJECTED])
+def test_review_queue_writer_already_correct_terminal_state_is_a_noop(status: QueueStatus) -> None:
+    service = _SheetsService(
+        {
+            "'Chef''s Desserts'!A2:D": [
+                [str(_review_decision().source_url), "", status.value, "Resolved document URL"]
+            ]
+        }
+    )
+
+    GoogleSheetsReviewQueueStateWriter(service, spreadsheet_id="queue-sheet").resolve(
+        _review_decision(), status, "Resolved document URL"
+    )
+
+    assert service.values_api.update_calls == []
+
+
+@pytest.mark.parametrize("current", [None, 17, [], {}])
+def test_review_queue_writer_refuses_non_text_status_without_writes(current: object) -> None:
+    service = _SheetsService(
+        {"'Chef''s Desserts'!A2:D": [[str(_review_decision().source_url), "", cast(Any, current)]]}
+    )
+
+    with pytest.raises(PipelineOperationalError):
+        GoogleSheetsReviewQueueStateWriter(service, spreadsheet_id="queue-sheet").resolve(
+            _review_decision(), QueueStatus.PUBLISHED, "Resolved document URL"
+        )
+
+    assert service.values_api.update_calls == []
+
+
+def test_review_queue_writer_refuses_missing_status_without_writes() -> None:
+    service = _SheetsService({"'Chef''s Desserts'!A2:D": [[str(_review_decision().source_url)]]})
+
+    with pytest.raises(PipelineOperationalError):
+        GoogleSheetsReviewQueueStateWriter(service, spreadsheet_id="queue-sheet").resolve(
+            _review_decision(), QueueStatus.PUBLISHED, "Resolved document URL"
+        )
+
+    assert service.values_api.update_calls == []
+
+
+@pytest.mark.parametrize("status", [QueueStatus.PUBLISHED, QueueStatus.REJECTED])
+def test_review_queue_writer_refuses_opposite_terminal_state_with_matching_detail(
+    status: QueueStatus,
+) -> None:
+    current = QueueStatus.REJECTED if status is QueueStatus.PUBLISHED else QueueStatus.PUBLISHED
+    service = _SheetsService(
+        {
+            "'Chef''s Desserts'!A2:D": [
+                [str(_review_decision().source_url), "", current.value, "Resolved document URL"]
+            ]
+        }
+    )
+
+    with pytest.raises(PipelineOperationalError):
+        GoogleSheetsReviewQueueStateWriter(service, spreadsheet_id="queue-sheet").resolve(
+            _review_decision(), status, "Resolved document URL"
+        )
+
+    assert service.values_api.update_calls == []
+
+
+@pytest.mark.parametrize("status", [QueueStatus.PENDING, QueueStatus.REVIEW, QueueStatus.ERROR])
+def test_review_queue_writer_refuses_non_terminal_target_without_writes(
+    status: QueueStatus,
+) -> None:
+    service = _SheetsService(
+        {"'Chef''s Desserts'!A2:D": [[str(_review_decision().source_url), "", "Review"]]}
+    )
+
+    with pytest.raises(PipelineOperationalError):
+        GoogleSheetsReviewQueueStateWriter(service, spreadsheet_id="queue-sheet").resolve(
+            _review_decision(), status, "Resolved document URL"
+        )
 
     assert service.values_api.update_calls == []
 

@@ -60,7 +60,7 @@ class GoogleSheetsReviewSyncSnapshotReader:
                             queue_row_number=number,
                             status=_queue_status(row[2] if len(row) > 2 else ""),
                             description=_optional_cell(row, 1),
-                            detail=_optional_cell(row, 3),
+                            detail=row[3] if len(row) > 3 else None,
                         )
                     )
                 except (ValueError, PipelineOperationalError) as error:
@@ -309,7 +309,7 @@ class GoogleSheetsRecipeQueueStateWriter:
 
 
 class GoogleSheetsReviewQueueStateWriter:
-    """Resolves the unique queue row matching a review's category and exact URL."""
+    """Resolve an exact review identity without overwriting protected Input state."""
 
     def __init__(self, service: Any, *, spreadsheet_id: str) -> None:
         if not spreadsheet_id:
@@ -318,6 +318,8 @@ class GoogleSheetsReviewQueueStateWriter:
         self._spreadsheet_id = spreadsheet_id
 
     def resolve(self, decision: ReviewDecision, status: QueueStatus, detail: str) -> None:
+        if status not in {QueueStatus.PUBLISHED, QueueStatus.REJECTED}:
+            raise PipelineOperationalError("Review resolution requires a terminal queue status")
         try:
             response = (
                 self._service.spreadsheets()
@@ -328,7 +330,10 @@ class GoogleSheetsReviewQueueStateWriter:
         except Exception as error:
             raise PipelineOperationalError("Cannot read the recipe queue spreadsheet") from error
         values = response.get("values", [])
-        if not isinstance(values, list) or any(not isinstance(row, list) for row in values):
+        if not isinstance(values, list) or any(
+            not isinstance(row, list) or any(not isinstance(cell, str) for cell in row)
+            for row in values
+        ):
             raise PipelineOperationalError("Recipe queue returned invalid values")
         matches = [
             row_number
@@ -339,6 +344,16 @@ class GoogleSheetsReviewQueueStateWriter:
             raise PipelineOperationalError(
                 f"Expected exactly one queue row for {decision.source_url} "
                 f"in {decision.category!r}; found {len(matches)}"
+            )
+        row = values[matches[0] - 2]
+        current_status = _queue_status(row[2] if len(row) > 2 else "")
+        current_detail = row[3] if len(row) > 3 else None
+        if current_status is status and current_detail == detail:
+            return
+        if current_status is not QueueStatus.REVIEW:
+            raise PipelineOperationalError(
+                f"Cannot resolve queue row in {current_status.value!r} state; "
+                "expected Review or an already matching terminal state"
             )
         try:
             (
@@ -474,10 +489,14 @@ class GoogleSheetsReviewRowRemover:
 
     def remove(self, decision: ReviewDecision) -> None:
         try:
-            metadata = self._service.spreadsheets().get(
-                spreadsheetId=self._spreadsheet_id,
-                fields="sheets(properties(sheetId,title))",
-            ).execute()
+            metadata = (
+                self._service.spreadsheets()
+                .get(
+                    spreadsheetId=self._spreadsheet_id,
+                    fields="sheets(properties(sheetId,title))",
+                )
+                .execute()
+            )
             sheet_id = next(
                 sheet["properties"]["sheetId"]
                 for sheet in metadata["sheets"]
@@ -792,9 +811,7 @@ def _render(
         builder.line(f"- {ingredient.original_text}")
     if presentation is not None and presentation.servings_text:
         builder.line()
-        builder.line(
-            f"Servings: {presentation.servings_text}", bold_prefix_length=len("Servings:")
-        )
+        builder.line(f"Servings: {presentation.servings_text}", bold_prefix_length=len("Servings:"))
     if presentation is not None and presentation.nutrition_notes:
         builder.line()
         nutrition_label = "Nutrition (manual):"
@@ -848,9 +865,7 @@ def _render_review(result: PipelineResult, queued_recipe: QueuedRecipe) -> _Rend
         builder.line()
         builder.line("Completeness findings", named_style_type="HEADING_2")
         for completeness_finding in result.recipe.completeness_findings:
-            builder.line(
-                f"- [{completeness_finding.code}] {completeness_finding.message}"
-            )
+            builder.line(f"- [{completeness_finding.code}] {completeness_finding.message}")
     builder.line()
     builder.line("Evidence excerpts", named_style_type="HEADING_2")
     if not result.evidence_segments:

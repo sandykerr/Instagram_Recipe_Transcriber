@@ -71,6 +71,8 @@ def _resolution(
         recipe_id=recipe_id,
         decision=decision,
         document=_document(f"final-{recipe_id}"),
+        master_row_written=decision is ReviewDecisionStatus.ACCEPTED,
+        rejected_row_written=decision is ReviewDecisionStatus.REJECTED,
     )
 
 
@@ -156,13 +158,53 @@ def test_already_synchronized_resolution_is_a_noop(
     assert plan == ReviewSyncPlan()
 
 
-def test_terminal_status_with_stale_detail_is_repaired_from_resolution() -> None:
-    plan = ReviewSyncPlanner(reviews={}, resolutions={"pasta": _resolution()}).plan(
-        (_queue(status=QueueStatus.PUBLISHED, detail="old document"),), ()
+@pytest.mark.parametrize("decision", list(ReviewDecisionStatus))
+@pytest.mark.parametrize("active_rows", [(), (_active(),)])
+def test_incomplete_destination_delivery_blocks_resolution_actions(
+    decision: ReviewDecisionStatus, active_rows: tuple[ActiveReviewRow, ...]
+) -> None:
+    resolution = _resolution(decision).model_copy(
+        update={
+            "master_row_written": decision is ReviewDecisionStatus.REJECTED,
+            "rejected_row_written": decision is ReviewDecisionStatus.ACCEPTED,
+        }
+    )
+    plan = ReviewSyncPlanner(reviews={}, resolutions={"pasta": resolution}).plan(
+        (_queue(),), active_rows
     )
 
-    assert len(plan.queue_updates) == 1
-    assert plan.queue_updates[0].detail == "https://docs.google.com/document/d/final-pasta/edit"
+    _assert_no_mutations(plan)
+    assert [conflict.reason.value for conflict in plan.conflicts] == ["incomplete_resolution"]
+
+
+@pytest.mark.parametrize("decision", list(ReviewDecisionStatus))
+@pytest.mark.parametrize("status", [QueueStatus.PUBLISHED, QueueStatus.REJECTED])
+@pytest.mark.parametrize("detail", [None, "old document"])
+def test_conflicting_terminal_queue_state_blocks_all_resolution_actions(
+    decision: ReviewDecisionStatus, status: QueueStatus, detail: str | None
+) -> None:
+    plan = ReviewSyncPlanner(reviews={}, resolutions={"pasta": _resolution(decision)}).plan(
+        (_queue(status=status, detail=detail),), (_active(),)
+    )
+
+    _assert_no_mutations(plan)
+    assert [conflict.reason.value for conflict in plan.conflicts] == ["queue_state_mismatch"]
+
+
+@pytest.mark.parametrize("decision", list(ReviewDecisionStatus))
+def test_opposite_terminal_status_blocks_even_with_the_correct_detail(
+    decision: ReviewDecisionStatus,
+) -> None:
+    status = (
+        QueueStatus.REJECTED if decision is ReviewDecisionStatus.ACCEPTED else QueueStatus.PUBLISHED
+    )
+    plan = ReviewSyncPlanner(reviews={}, resolutions={"pasta": _resolution(decision)}).plan(
+        (_queue(status=status, detail="https://docs.google.com/document/d/final-pasta/edit"),),
+        (_active(),),
+    )
+
+    _assert_no_mutations(plan)
+    assert [conflict.reason.value for conflict in plan.conflicts] == ["queue_state_mismatch"]
 
 
 @pytest.mark.parametrize("active_rows", [(), (_active(),)])

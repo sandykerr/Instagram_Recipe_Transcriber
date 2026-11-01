@@ -1,8 +1,8 @@
 """Pure, deterministic reconciliation of live review rows and local checkpoints.
 
 Callers load checkpoints and row snapshots; this module neither reads stores nor
-performs mutations. Live rows, not checkpoint write flags, determine what work
-is missing. A resolution's decision is authoritative for the terminal status.
+performs mutations. Live rows determine missing queue work only after a
+resolution's decision-specific destination delivery has been checkpointed.
 """
 
 from __future__ import annotations
@@ -76,8 +76,10 @@ class ReviewSyncConflictReason(StrEnum):
     DUPLICATE_RECIPE_ID = "duplicate_recipe_id"
     DUPLICATE_SOURCE_URL = "duplicate_source_url"
     IDENTITY_MISMATCH = "identity_mismatch"
+    INCOMPLETE_RESOLUTION = "incomplete_resolution"
     MISSING_CHECKPOINT = "missing_checkpoint"
     MISSING_QUEUE_ROW = "missing_queue_row"
+    QUEUE_STATE_MISMATCH = "queue_state_mismatch"
 
 
 class ReviewSyncConflict(_ImmutableModel):
@@ -153,15 +155,10 @@ class ReviewSyncPlanner:
                     else QueueStatus.REJECTED
                 )
                 detail = str(resolution.document.url)
-                if queue.status in {
-                    QueueStatus.REVIEW,
-                    QueueStatus.PUBLISHED,
-                    QueueStatus.REJECTED,
-                }:
-                    if queue.status is not status or queue.detail != detail:
-                        queue_updates.append(
-                            ReviewQueueUpdateAction(queue_row=queue, status=status, detail=detail)
-                        )
+                if queue.status is QueueStatus.REVIEW:
+                    queue_updates.append(
+                        ReviewQueueUpdateAction(queue_row=queue, status=status, detail=detail)
+                    )
             elif queue.status is QueueStatus.REVIEW and not active:
                 appends.append(ReviewAppendAction(queue_row=queue, review=self._reviews[recipe_id]))
 
@@ -204,6 +201,20 @@ class ReviewSyncPlanner:
             )
             if needs_checkpoint and review is None and resolution is None:
                 reasons.add(ReviewSyncConflictReason.MISSING_CHECKPOINT)
+            if resolution is not None:
+                accepted = resolution.decision is ReviewDecisionStatus.ACCEPTED
+                delivered = (
+                    resolution.master_row_written if accepted else resolution.rejected_row_written
+                )
+                if not delivered:
+                    reasons.add(ReviewSyncConflictReason.INCOMPLETE_RESOLUTION)
+                status = QueueStatus.PUBLISHED if accepted else QueueStatus.REJECTED
+                if any(
+                    row.status in {QueueStatus.PUBLISHED, QueueStatus.REJECTED}
+                    and (row.status is not status or row.detail != str(resolution.document.url))
+                    for row in queues
+                ):
+                    reasons.add(ReviewSyncConflictReason.QUEUE_STATE_MISMATCH)
         return reasons
 
 
