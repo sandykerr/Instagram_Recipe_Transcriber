@@ -41,6 +41,7 @@ class QueueStatus(StrEnum):
     PENDING = "pending"
     PROCESSING = "processing"
     PUBLISHED = "published"
+    REJECTED = "rejected"
     REVIEW = "review"
     ERROR = "error"
 

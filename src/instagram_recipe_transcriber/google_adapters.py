@@ -108,6 +108,54 @@ class GoogleSheetsRecipeQueueStateWriter:
             raise PipelineOperationalError("Cannot update the recipe queue status") from error
 
 
+class GoogleSheetsReviewQueueStateWriter:
+    """Resolves the unique queue row matching a review's category and exact URL."""
+
+    def __init__(self, service: Any, *, spreadsheet_id: str) -> None:
+        if not spreadsheet_id:
+            raise ValueError("spreadsheet_id is required")
+        self._service = service
+        self._spreadsheet_id = spreadsheet_id
+
+    def resolve(self, decision: ReviewDecision, status: QueueStatus, detail: str) -> None:
+        try:
+            response = (
+                self._service.spreadsheets()
+                .values()
+                .get(spreadsheetId=self._spreadsheet_id, range=_queue_range(decision.category))
+                .execute()
+            )
+        except Exception as error:
+            raise PipelineOperationalError("Cannot read the recipe queue spreadsheet") from error
+        values = response.get("values", [])
+        if not isinstance(values, list) or any(not isinstance(row, list) for row in values):
+            raise PipelineOperationalError("Recipe queue returned invalid values")
+        matches = [
+            row_number
+            for row_number, row in enumerate(values, start=2)
+            if row and row[0] == str(decision.source_url)
+        ]
+        if len(matches) != 1:
+            raise PipelineOperationalError(
+                f"Expected exactly one queue row for {decision.source_url} "
+                f"in {decision.category!r}; found {len(matches)}"
+            )
+        try:
+            (
+                self._service.spreadsheets()
+                .values()
+                .update(
+                    spreadsheetId=self._spreadsheet_id,
+                    range=_queue_state_range(decision.category, matches[0]),
+                    valueInputOption="RAW",
+                    body={"values": [[status.value, detail]]},
+                )
+                .execute()
+            )
+        except Exception as error:
+            raise PipelineOperationalError("Cannot update the recipe queue status") from error
+
+
 class GoogleSheetsRecipeMasterWriter:
     """Appends a recipe title and Google Doc URL to the matching master tab."""
 

@@ -162,6 +162,12 @@ class ReviewDecisionReader(Protocol):
     def read_next(self) -> ReviewDecision | None: ...
 
 
+class ReviewQueueStateWriter(Protocol):
+    """Resolves a queue item's state using its review decision's source identity."""
+
+    def resolve(self, decision: ReviewDecision, status: QueueStatus, detail: str) -> None: ...
+
+
 class ReviewRowRemover(Protocol):
     def remove(self, decision: ReviewDecision) -> None: ...
 

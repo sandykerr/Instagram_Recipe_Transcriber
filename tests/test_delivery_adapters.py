@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 from pydantic import HttpUrl
 
 from instagram_recipe_transcriber.acquisition import YtDlpAcquirer, recipe_id_for_url
+from instagram_recipe_transcriber.errors import PipelineOperationalError
 from instagram_recipe_transcriber.google_adapters import (
     GoogleDocsRecipeReviewWriter,
     GoogleDocsRecipeWriter,
@@ -17,7 +19,9 @@ from instagram_recipe_transcriber.google_adapters import (
     GoogleSheetsRecipeReviewWriter,
     GoogleSheetsRejectedRecipeWriter,
     GoogleSheetsReviewDecisionReader,
+    GoogleSheetsReviewQueueStateWriter,
 )
+from instagram_recipe_transcriber.interfaces import ReviewQueueStateWriter
 from instagram_recipe_transcriber.models import (
     EvidenceReference,
     EvidenceSegment,
@@ -326,6 +330,92 @@ def test_queue_state_writer_updates_status_and_detail_for_the_row() -> None:
             },
         }
     ]
+
+
+def _review_decision() -> ReviewDecision:
+    return ReviewDecision(
+        recipe_id="queued-recipe",
+        source_url=_queued_recipe().source_url,
+        category="Chef's Desserts",
+        review_row_number=20,
+        decision=ReviewDecisionStatus.ACCEPTED,
+        review_document_url=HttpUrl("https://docs.google.com/document/d/review/edit"),
+    )
+
+
+@pytest.mark.parametrize("status", ["published", "rejected"])
+def test_review_queue_writer_resolves_exact_url_in_category_at_its_current_row(
+    status: str,
+) -> None:
+    service = _SheetsService(
+        {
+            "'Chef''s Desserts'!A2:D": [
+                ["https://www.instagram.com/reel/DVJBGzyk8E5/?extra=1", "", "review"],
+                [],
+                ["https://www.instagram.com/reel/DVJBGzyk8E5/", "", "review"],
+            ]
+        }
+    )
+    writer: ReviewQueueStateWriter = GoogleSheetsReviewQueueStateWriter(
+        service, spreadsheet_id="queue-sheet"
+    )
+
+    writer.resolve(_review_decision(), QueueStatus(status), "Resolved document URL")
+
+    assert service.values_api.get_calls == [
+        {"spreadsheetId": "queue-sheet", "range": "'Chef''s Desserts'!A2:D"}
+    ]
+    assert service.values_api.update_calls == [
+        {
+            "spreadsheetId": "queue-sheet",
+            "range": "'Chef''s Desserts'!C4:D4",
+            "valueInputOption": "RAW",
+            "body": {"values": [[status, "Resolved document URL"]]},
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [],
+        [["https://www.instagram.com/reel/DVJBGzyk8E5/?extra=1"]],
+        [
+            ["https://www.instagram.com/reel/DVJBGzyk8E5/"],
+            ["https://www.instagram.com/reel/DVJBGzyk8E5/"],
+        ],
+    ],
+    ids=["empty-tab", "missing-exact-url", "duplicate-url"],
+)
+def test_review_queue_writer_requires_exactly_one_match_before_updating(
+    rows: list[list[str]],
+) -> None:
+    service = _SheetsService({"'Chef''s Desserts'!A2:D": rows})
+    writer = GoogleSheetsReviewQueueStateWriter(service, spreadsheet_id="queue-sheet")
+
+    with pytest.raises(PipelineOperationalError):
+        writer.resolve(_review_decision(), QueueStatus.PUBLISHED, "Resolved document URL")
+
+    assert service.values_api.update_calls == []
+
+
+def test_queue_reader_skips_terminal_rejected_rows() -> None:
+    service = _SheetsService(
+        {
+            "'Desserts'!A2:D": [
+                ["https://www.instagram.com/reel/rejected/", "", "rejected"],
+                ["https://www.instagram.com/reel/pending/", "", "pending"],
+            ]
+        }
+    )
+
+    queued = GoogleSheetsRecipeQueueReader(
+        service, spreadsheet_id="queue-sheet", categories=("Desserts",)
+    ).read_next()
+
+    assert queued is not None
+    assert queued.queue_row_number == 3
+    assert str(queued.source_url) == "https://www.instagram.com/reel/pending/"
 
 
 def test_review_document_and_sheet_writer_preserve_review_context() -> None:
