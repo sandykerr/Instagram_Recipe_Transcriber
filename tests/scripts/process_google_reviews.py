@@ -1,8 +1,8 @@
-"""Process a bounded batch of Approved/Accepted/Rejected Review Sheet rows.
+"""Process Approved/Accepted/Rejected rows from the configured Review Sheet.
 
-This is a manual integration operation, not a pytest test. It makes real Docs,
-Drive, and Sheets changes and requires --execute-writes. It defaults to two
-rows. --all additionally requires --confirm-all.
+This manual production command makes real Docs, Drive, and Sheets changes and
+requires --execute-writes. It defaults to two rows. --all additionally requires
+--confirm-all.
 """
 
 from __future__ import annotations

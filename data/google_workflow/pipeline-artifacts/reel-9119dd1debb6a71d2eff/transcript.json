@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "stage": "transcript",
+  "input_hash": "d9fd232483a751f40218bf5ece49ff15a3f057927fc97bc4f23fb83e3c8b3241",
+  "created_at": "2026-10-27T22:20:53.523288Z",
+  "payload": {
+    "segments": [
+      {
+        "evidence_id": "transcript-1",
+        "source_kind": "transcript",
+        "text": "I know that a single one, not a single serving, a single whole one of these never seen before massive crumble brookies is less than 300 calories, which means a single slice of these could be under 40 calories and they're packing in protein. It's gooier than, let me show you how to make it. I've been sending this video quite a fair bit recently, so I thought let's give the fans what they want. So let's give it a go.",
+        "confidence": null,
+        "start_seconds": 0.4,
+        "end_seconds": 29.42,
+        "frame_timestamp_seconds": null,
+        "frame_path": null,
+        "bounding_polygon": null
+      },
+      {
+        "evidence_id": "transcript-2",
+        "source_kind": "transcript",
+        "text": "Now tell you what this almost turned out exactly like the one in the video But as we all know that means absolutely fuck all if it tastes like shit So as always I'm gonna taste test it and let you know whether to smash it or trash it. Bon appetit That is 100% a smash. Holy shit balls That was the first brownie I've had on the internet that actually had the same texture and tasted very similar to a real brownie",
+        "confidence": null,
+        "start_seconds": 34.7,
+        "end_seconds": 67.55,
+        "frame_timestamp_seconds": null,
+        "frame_path": null,
+        "bounding_polygon": null
+      },
+      {
+        "evidence_id": "transcript-3",
+        "source_kind": "transcript",
+        "text": "but it's got half the calories and double the protein. I highly recommend you give this recipe a go.",
+        "confidence": null,
+        "start_seconds": 67.55,
+        "end_seconds": 72.68,
+        "frame_timestamp_seconds": null,
+        "frame_path": null,
+        "bounding_polygon": null
+      }
+    ],
+    "language": "en",
+    "language_probability": 0.9997764229774475,
+    "model_name": "turbo",
+    "compute_type": "int8"
+  }
+}

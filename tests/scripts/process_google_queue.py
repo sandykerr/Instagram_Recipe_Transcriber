@@ -1,10 +1,10 @@
-"""Run and verify a real bounded Google Sheet batch.
+"""Process Pending recipes from the configured Google queue.
 
-This paid/manual integration test updates queue statuses, may call OpenAI, creates
+This manual production command updates queue statuses, may call OpenAI, creates
 Google Docs for READY recipes, and appends published recipes to the Master Sheet.
-It is deliberately not part of pytest. The default processes one bounded batch of
-two items. Use --verify-retry for read-only inspection; never call a second batch
-merely to verify retries, because two calls with --max-items 2 can process four rows.
+The default processes a bounded batch of two items. Use --verify-retry for read-only
+inspection; never call a second batch merely to verify retries, because two calls
+with --max-items 2 can process four rows.
 """
 
 from __future__ import annotations
@@ -165,12 +165,12 @@ def parse_args() -> argparse.Namespace:
     limit.add_argument(
         "--all",
         action="store_true",
-        help="Process every currently eligible row; use only after the bounded smoke passes",
+        help="Process every currently eligible row; use only after a bounded run passes",
     )
     parser.add_argument(
         "--verify-retry",
         action="store_true",
-        help="Read-only verification of statuses recorded by the previous batch smoke",
+        help="Read-only verification of statuses recorded by the previous queue batch",
     )
     parser.add_argument(
         "--execute-writes",
@@ -337,12 +337,13 @@ def per_recipe_counts(
 def _queue_statuses(config: GoogleWorkflowConfig, sheets: Any) -> dict[str, str]:
     statuses: dict[str, str] = {}
     for category in config.category_tabs:
+        escaped_category = category.replace("'", "''")
         values = (
             sheets.spreadsheets()
             .values()
             .get(
                 spreadsheetId=config.queue_spreadsheet_id,
-                range=f"'{category.replace("'", "''")}'!A2:D",
+                range=f"'{escaped_category}'!A2:D",
             )
             .execute()
             .get("values", [])
@@ -356,9 +357,13 @@ def _queue_statuses(config: GoogleWorkflowConfig, sheets: Any) -> dict[str, str]
 
 
 def verify_prior_batch(config: GoogleWorkflowConfig, sheets: Any) -> None:
-    result_path = config.working_root / "google_batch_smoke_result.json"
+    result_path = config.working_root / "google_queue_batch_result.json"
     if not result_path.is_file():
-        raise FileNotFoundError(f"No prior batch result exists: {result_path}")
+        legacy_result_path = config.working_root / "google_batch_smoke_result.json"
+        if legacy_result_path.is_file():
+            result_path = legacy_result_path
+        else:
+            raise FileNotFoundError(f"No prior queue batch result exists: {result_path}")
     prior = BatchWorkflowResult.model_validate_json(result_path.read_text(encoding="utf-8"))
     statuses = _queue_statuses(config, sheets)
     expected = {QueueStatus.PUBLISHED, QueueStatus.REVIEW, QueueStatus.ERROR}
@@ -437,7 +442,7 @@ def main() -> None:
         for publication in publications.values()
     )
 
-    result_path = config.working_root / "google_batch_smoke_result.json"
+    result_path = config.working_root / "google_queue_batch_result.json"
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(
         first.model_dump_json(indent=2) + "\n",

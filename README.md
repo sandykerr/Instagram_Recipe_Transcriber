@@ -31,12 +31,11 @@ micromamba activate instagram-recipe-env
 direnv allow
 ```
 
-The tracked `.envrc` loads `OPENAI_API_KEY` from the ignored `keys.txt` whenever
-you enter the repository. `keys.txt` must use this local format:
+The tracked `.envrc` loads variables from the ignored `.env` file whenever you
+enter the repository. Store the OpenAI key in this format:
 
-```text
-OpenAI API key:
-your-key
+```dotenv
+OPENAI_API_KEY=your-key
 ```
 
 Google OAuth is loaded from `google_oauth_client.json`; its client secret does
@@ -71,18 +70,19 @@ modify recipe Sheets, Docs, or Drive files.
 
 ## Production commands
 
-Process every currently eligible Queue Sheet row:
+`process_google_queue.py` processes every currently eligible Queue Sheet row:
 
 ```bash
-PYTHONPATH=src python tests/scripts/google_batch_smoke.py \
+PYTHONPATH=src python tests/scripts/process_google_queue.py \
   --all \
   --execute-writes
 ```
 
-Process every approved, accepted, or rejected Review Sheet row:
+`process_google_reviews.py` processes every approved, accepted, or rejected
+Review Sheet row:
 
 ```bash
-PYTHONPATH=src python tests/scripts/google_review_promotion_batch.py \
+PYTHONPATH=src python tests/scripts/process_google_reviews.py \
   --all \
   --confirm-all \
   --execute-writes

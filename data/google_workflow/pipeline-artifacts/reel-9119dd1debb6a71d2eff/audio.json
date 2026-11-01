@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "stage": "audio",
+  "input_hash": "622fc8718766b38f9af683b5ed3c266160b44f1f6d8a674d40cf01cb6c621982",
+  "created_at": "2026-10-27T22:20:26.162456Z",
+  "payload": {
+    "audio_path": "/home/sandy/code/Instagram_Recipe_Transcriber/data/google_workflow/reel-9119dd1debb6a71d2eff/audio.wav",
+    "audio_sha256": "0ab6d4398a4fae4028f27d242aa6de6bd2eecb0293753fb8508a534ca2e8f995",
+    "sample_rate_hz": 16000,
+    "channels": 1
+  }
+}

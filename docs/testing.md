@@ -35,7 +35,7 @@ Run the paid caption-first OpenAI smoke test:
 PYTHONPATH=src python tests/scripts/caption_first_openai_smoke.py
 ```
 
-## Google queue smoke tests
+## Google queue integration checks
 
 Run one known queue item through acquisition, extraction, publication, and
 retry verification:
@@ -48,7 +48,7 @@ PYTHONPATH=src python tests/scripts/google_single_item_smoke.py \
 Run a bounded batch of two eligible Queue Sheet rows:
 
 ```bash
-PYTHONPATH=src python tests/scripts/google_batch_smoke.py \
+PYTHONPATH=src python tests/scripts/process_google_queue.py \
   --max-items 2 \
   --execute-writes
 ```
@@ -56,13 +56,13 @@ PYTHONPATH=src python tests/scripts/google_batch_smoke.py \
 Verify the previous batch's terminal rows without processing new Pending rows:
 
 ```bash
-PYTHONPATH=src python tests/scripts/google_batch_smoke.py --verify-retry
+PYTHONPATH=src python tests/scripts/process_google_queue.py --verify-retry
 ```
 
 These commands can create Docs, move Drive files, update Sheets, and make paid
 OpenAI requests.
 
-## Review-promotion smoke tests
+## Review-promotion integration checks
 
 Resolve exactly one Accepted or Rejected Review Sheet row and verify an
 idempotent replay:
@@ -75,7 +75,7 @@ PYTHONPATH=src python tests/scripts/google_review_promotion_smoke.py \
 Resolve a bounded batch of two actionable review rows:
 
 ```bash
-PYTHONPATH=src python tests/scripts/google_review_promotion_batch.py \
+PYTHONPATH=src python tests/scripts/process_google_reviews.py \
   --max-items 2 \
   --execute-writes
 ```

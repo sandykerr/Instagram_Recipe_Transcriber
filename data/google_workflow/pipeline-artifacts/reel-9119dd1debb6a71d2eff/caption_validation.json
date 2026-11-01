@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "stage": "caption_validation",
+  "input_hash": "0ddfa8d18ba9d600e40e3cbbe5fedb56c406981acec97db92c13d383e472cb5c",
+  "created_at": "2026-10-27T22:20:26.018758Z",
+  "payload": {
+    "outcome": "review",
+    "findings": [
+      {
+        "code": "unquantified_core_ingredient",
+        "message": "A main component lacks an explicit amount for at least one recipe component: cookie batter and brownie batter include ingredients without a single clear total amount for a standalone published recipe context."
+      },
+      {
+        "code": "missing_servings",
+        "message": "No explicit recipe yield or serving count is present in the creator's instructions or caption for the recipe context."
+      },
+      {
+        "code": "missing_macros",
+        "message": "No explicit complete macro breakdown for protein, carbohydrates/carbs, and fat is present as creator-stated nutrition information in a publishable recipe context."
+      }
+    ]
+  }
+}

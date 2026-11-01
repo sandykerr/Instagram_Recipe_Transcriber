@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "stage": "ocr_decision",
+  "input_hash": "a15d819215dc716843862e4c5cfacc582f5f7e3a21b112412b2f4e9d97fc5dca",
+  "created_at": "2026-10-27T22:20:55.384054Z",
+  "payload": {
+    "should_run": false,
+    "policy": "when_needed",
+    "reason": "Caption and transcript satisfy the deterministic OCR gate"
+  }
+}
