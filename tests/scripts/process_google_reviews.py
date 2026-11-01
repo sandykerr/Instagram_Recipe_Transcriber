@@ -19,11 +19,13 @@ from instagram_recipe_transcriber.google_adapters import (
     GoogleSheetsRecipeMasterWriter,
     GoogleSheetsRejectedRecipeWriter,
     GoogleSheetsReviewDecisionReader,
+    GoogleSheetsReviewQueueStateWriter,
     GoogleSheetsReviewRowRemover,
 )
 from instagram_recipe_transcriber.google_oauth import GoogleOAuthServiceFactory
 from instagram_recipe_transcriber.models import (
     QueuedRecipe,
+    QueueStatus,
     RecipeCandidate,
     RecipeDocument,
     RecipeDocumentPresentation,
@@ -127,6 +129,17 @@ class TrackedRowRemover:
         self._delegate.remove(decision)
 
 
+class TrackedQueueStateWriter:
+    def __init__(self, delegate: GoogleSheetsReviewQueueStateWriter) -> None:
+        self._delegate = delegate
+        self.calls = 0
+
+    def resolve(self, decision: ReviewDecision, status: QueueStatus, detail: str) -> None:
+        print(f"Updating {decision.recipe_id} Input queue status to {status.value}...")
+        self.calls += 1
+        self._delegate.resolve(decision, status, detail)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -183,6 +196,7 @@ def call_counts(
     rejected_organizer: TrackedOrganizer,
     rejected_writer: TrackedRejectedWriter,
     row_remover: TrackedRowRemover,
+    queue_state_writer: TrackedQueueStateWriter,
 ) -> dict[str, int]:
     return {
         "final_docs": document_writer.calls,
@@ -191,6 +205,7 @@ def call_counts(
         "rejected_moves": rejected_organizer.calls,
         "rejected_rows": rejected_writer.calls,
         "review_rows_deleted": row_remover.calls,
+        "queue_rows_updated": queue_state_writer.calls,
     }
 
 
@@ -232,6 +247,11 @@ def main() -> None:
     row_remover = TrackedRowRemover(
         GoogleSheetsReviewRowRemover(services.sheets, spreadsheet_id=config.review_spreadsheet_id)
     )
+    queue_state_writer = TrackedQueueStateWriter(
+        GoogleSheetsReviewQueueStateWriter(
+            services.sheets, spreadsheet_id=config.queue_spreadsheet_id
+        )
+    )
 
     def build_workflow(reader: Any) -> ReviewPromotionWorkflow:
         return ReviewPromotionWorkflow(
@@ -239,6 +259,7 @@ def main() -> None:
             review_store=review_store,
             resolution_store=resolution_store,
             review_row_remover=row_remover,
+            queue_state_writer=queue_state_writer,
             document_writer=document_writer,
             master_writer=master_writer,
             publication_store=JsonPublicationStore(config.working_root / "publication"),
@@ -250,9 +271,7 @@ def main() -> None:
     started = time.perf_counter()
     limit_label = "all actionable rows" if args.all else f"up to {args.max_items} row(s)"
     print(f"Starting review-promotion batch for {limit_label}...")
-    result = build_workflow(live_reader).process_all(
-        max_items=None if args.all else args.max_items
-    )
+    result = build_workflow(live_reader).process_all(max_items=None if args.all else args.max_items)
     elapsed = time.perf_counter() - started
     counts_after_first = call_counts(
         document_writer,
@@ -261,13 +280,12 @@ def main() -> None:
         rejected_organizer,
         rejected_writer,
         row_remover,
+        queue_state_writer,
     )
 
     for resolution in result.resolutions:
-        print(
-            f"{resolution.decision.value}: {resolution.recipe_id} | "
-            f"{resolution.document.url}"
-        )
+        assert resolution.queue_row_updated
+        print(f"{resolution.decision.value}: {resolution.recipe_id} | {resolution.document.url}")
     print(f"Processed: {result.processed_count} review row(s) in {elapsed:.2f}s")
     if not result.resolutions:
         print("No Approved, Accepted, or Rejected Review Sheet rows were available.")
@@ -277,14 +295,18 @@ def main() -> None:
         max_items=len(live_reader.decisions) or 1
     )
     assert retry.resolutions == result.resolutions
-    assert call_counts(
-        document_writer,
-        accepted_organizer,
-        master_writer,
-        rejected_organizer,
-        rejected_writer,
-        row_remover,
-    ) == counts_after_first
+    assert (
+        call_counts(
+            document_writer,
+            accepted_organizer,
+            master_writer,
+            rejected_organizer,
+            rejected_writer,
+            row_remover,
+            queue_state_writer,
+        )
+        == counts_after_first
+    )
     print("PASS: in-process retry reused every resolution without extra external writes")
     external_calls = ", ".join(f"{name}={count}" for name, count in counts_after_first.items())
     print("External calls: " + external_calls)

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 from pydantic import HttpUrl
 
 from instagram_recipe_transcriber.models import (
@@ -8,6 +11,7 @@ from instagram_recipe_transcriber.models import (
     Instruction,
     PublicationArtifact,
     QueuedRecipe,
+    QueueStatus,
     RecipeCandidate,
     RecipeDocument,
     RecipeDocumentPresentation,
@@ -18,6 +22,7 @@ from instagram_recipe_transcriber.models import (
     ReviewDecisionStatus,
     ReviewResolutionArtifact,
 )
+from instagram_recipe_transcriber.publication import JsonReviewResolutionStore
 from instagram_recipe_transcriber.review_promotion import ReviewPromotionWorkflow
 
 
@@ -97,6 +102,14 @@ class _Remover:
         self.calls += 1
 
 
+class _QueueStateWriter:
+    def __init__(self) -> None:
+        self.updates: list[tuple[ReviewDecision, QueueStatus, str]] = []
+
+    def resolve(self, decision: ReviewDecision, status: QueueStatus, detail: str) -> None:
+        self.updates.append((decision, status, detail))
+
+
 def _decision(status: ReviewDecisionStatus) -> ReviewDecision:
     return ReviewDecision(
         recipe_id="review-recipe",
@@ -163,11 +176,13 @@ def test_accepted_review_creates_one_final_document_master_row_and_removes_revie
     review_store = _Store(_review())
     resolution_store = _Store()
     writer, master, rejected, remover = _Writer(), _Appender(), _Appender(), _Remover()
+    queue = _QueueStateWriter()
     workflow = ReviewPromotionWorkflow(
         decision_reader=_DecisionReader(_decision(ReviewDecisionStatus.ACCEPTED)),
         review_store=review_store,  # type: ignore[arg-type]
         resolution_store=resolution_store,  # type: ignore[arg-type]
         review_row_remover=remover,
+        queue_state_writer=queue,
         document_writer=writer,
         master_writer=master,
         publication_store=_Store(),  # type: ignore[arg-type]
@@ -183,6 +198,14 @@ def test_accepted_review_creates_one_final_document_master_row_and_removes_revie
     assert second == first
     assert writer.calls == master.calls == remover.calls == 1
     assert rejected.calls == 0
+    assert first.queue_row_updated
+    assert queue.updates == [
+        (
+            _decision(ReviewDecisionStatus.ACCEPTED),
+            QueueStatus.PUBLISHED,
+            "https://docs.google.com/document/d/final/edit",
+        )
+    ]
 
 
 def test_rejected_review_moves_doc_archives_row_and_removes_active_review_row() -> None:
@@ -190,11 +213,13 @@ def test_rejected_review_moves_doc_archives_row_and_removes_active_review_row() 
     resolution_store = _Store()
     rejected, remover = _Appender(), _Remover()
     rejected_organizer = _Organizer()
+    queue = _QueueStateWriter()
     workflow = ReviewPromotionWorkflow(
         decision_reader=_DecisionReader(_decision(ReviewDecisionStatus.REJECTED)),
         review_store=review_store,  # type: ignore[arg-type]
         resolution_store=resolution_store,  # type: ignore[arg-type]
         review_row_remover=remover,
+        queue_state_writer=queue,
         document_writer=_Writer(),
         master_writer=_Appender(),
         publication_store=_Store(),  # type: ignore[arg-type]
@@ -207,6 +232,15 @@ def test_rejected_review_moves_doc_archives_row_and_removes_active_review_row() 
 
     assert result is not None and result.rejected_row_written and result.review_row_removed
     assert rejected_organizer.calls == rejected.calls == remover.calls == 1
+    assert result.queue_row_updated
+    assert workflow.process_next() == result
+    assert queue.updates == [
+        (
+            _decision(ReviewDecisionStatus.REJECTED),
+            QueueStatus.REJECTED,
+            "https://docs.google.com/document/d/review/edit",
+        )
+    ]
 
 
 def test_accepted_missing_critical_step_uses_raw_transcript_not_candidate_steps() -> None:
@@ -222,6 +256,7 @@ def test_accepted_missing_critical_step_uses_raw_transcript_not_candidate_steps(
         review_store=_Store(review),  # type: ignore[arg-type]
         resolution_store=_ArtifactStore(),  # type: ignore[arg-type]
         review_row_remover=_Remover(),
+        queue_state_writer=_QueueStateWriter(),
         document_writer=writer,
         master_writer=_Appender(),
         publication_store=_ArtifactStore(),  # type: ignore[arg-type]
@@ -253,6 +288,7 @@ def test_accepted_review_carries_manual_servings_and_nutrition_notes() -> None:
         review_store=_Store(_review()),  # type: ignore[arg-type]
         resolution_store=_ArtifactStore(),  # type: ignore[arg-type]
         review_row_remover=_Remover(),
+        queue_state_writer=_QueueStateWriter(),
         document_writer=writer,
         master_writer=_Appender(),
         publication_store=_ArtifactStore(),  # type: ignore[arg-type]
@@ -279,11 +315,10 @@ def test_process_all_promotes_a_bounded_number_of_review_decisions() -> None:
     writer, master, rejected, remover = _Writer(), _Appender(), _Appender(), _Remover()
     workflow = ReviewPromotionWorkflow(
         decision_reader=_ListDecisionReader([first, second]),
-        review_store=_RecipeStore(
-            {first.recipe_id: first_review, second.recipe_id: second_review}
-        ),
+        review_store=_RecipeStore({first.recipe_id: first_review, second.recipe_id: second_review}),
         resolution_store=_ArtifactStore(),  # type: ignore[arg-type]
         review_row_remover=remover,
+        queue_state_writer=_QueueStateWriter(),
         document_writer=writer,
         master_writer=master,
         publication_store=_ArtifactStore(),  # type: ignore[arg-type]
@@ -301,3 +336,120 @@ def test_process_all_promotes_a_bounded_number_of_review_decisions() -> None:
     ]
     assert writer.calls == master.calls == remover.calls == 2
     assert rejected.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("decision_status", "queue_status", "document_url"),
+    [
+        (
+            ReviewDecisionStatus.ACCEPTED,
+            QueueStatus.PUBLISHED,
+            "https://docs.google.com/document/d/final/edit",
+        ),
+        (
+            ReviewDecisionStatus.REJECTED,
+            QueueStatus.REJECTED,
+            "https://docs.google.com/document/d/review/edit",
+        ),
+    ],
+)
+def test_queue_failure_retries_only_missing_update_from_durable_resolution(
+    tmp_path: Path,
+    decision_status: ReviewDecisionStatus,
+    queue_status: QueueStatus,
+    document_url: str,
+) -> None:
+    decision = _decision(decision_status)
+    resolution_root = tmp_path / "resolutions"
+    resolution_store = JsonReviewResolutionStore(resolution_root)
+    writer, master, rejected, remover = _Writer(), _Appender(), _Appender(), _Remover()
+    accepted_organizer, rejected_organizer = _Organizer(), _Organizer()
+
+    class FailingOnceQueueWriter(_QueueStateWriter):
+        def resolve(self, decision: ReviewDecision, status: QueueStatus, detail: str) -> None:
+            checkpoint = JsonReviewResolutionStore(resolution_root).load(decision.recipe_id)
+            assert checkpoint is not None
+            assert checkpoint.review_row_removed
+            assert checkpoint.master_row_written or checkpoint.rejected_row_written
+            assert not checkpoint.queue_row_updated
+            assert remover.calls == 1
+            super().resolve(decision, status, detail)
+            if len(self.updates) == 1:
+                raise RuntimeError("Input queue unavailable")
+
+    queue = FailingOnceQueueWriter()
+
+    def build_workflow() -> ReviewPromotionWorkflow:
+        return ReviewPromotionWorkflow(
+            decision_reader=_DecisionReader(decision),
+            review_store=_Store(_review()),  # type: ignore[arg-type]
+            resolution_store=JsonReviewResolutionStore(resolution_root),
+            review_row_remover=remover,
+            queue_state_writer=queue,
+            document_writer=writer,
+            master_writer=master,
+            publication_store=_ArtifactStore(),  # type: ignore[arg-type]
+            accepted_document_organizer=accepted_organizer,
+            rejected_document_organizer=rejected_organizer,
+            rejected_writer=rejected,
+        )
+
+    with pytest.raises(RuntimeError, match="Input queue unavailable"):
+        build_workflow().process_next()
+
+    checkpoint = resolution_store.load(decision.recipe_id)
+    assert checkpoint is not None and not checkpoint.queue_row_updated
+    counts = (
+        writer.calls,
+        master.calls,
+        rejected.calls,
+        remover.calls,
+        accepted_organizer.calls,
+        rejected_organizer.calls,
+    )
+    result = build_workflow().process_next()
+
+    assert result is not None and result.queue_row_updated
+    assert resolution_store.load(decision.recipe_id) == result
+    assert queue.updates == [(decision, queue_status, document_url)] * 2
+    assert (
+        writer.calls,
+        master.calls,
+        rejected.calls,
+        remover.calls,
+        accepted_organizer.calls,
+        rejected_organizer.calls,
+    ) == counts
+    assert build_workflow().process_next() == result
+    assert len(queue.updates) == 2
+
+
+def test_failed_review_row_removal_does_not_update_queue(tmp_path: Path) -> None:
+    class FailingRemover(_Remover):
+        def remove(self, decision: ReviewDecision) -> None:
+            raise RuntimeError("Review row removal failed")
+
+    queue = _QueueStateWriter()
+    resolution_store = JsonReviewResolutionStore(tmp_path)
+    workflow = ReviewPromotionWorkflow(
+        decision_reader=_DecisionReader(_decision(ReviewDecisionStatus.ACCEPTED)),
+        review_store=_Store(_review()),  # type: ignore[arg-type]
+        resolution_store=resolution_store,
+        review_row_remover=FailingRemover(),
+        queue_state_writer=queue,
+        document_writer=_Writer(),
+        master_writer=_Appender(),
+        publication_store=_ArtifactStore(),  # type: ignore[arg-type]
+        accepted_document_organizer=_Organizer(),
+        rejected_document_organizer=_Organizer(),
+        rejected_writer=_Appender(),
+    )
+
+    with pytest.raises(RuntimeError, match="Review row removal failed"):
+        workflow.process_next()
+
+    checkpoint = resolution_store.load("review-recipe")
+    assert checkpoint is not None and checkpoint.master_row_written
+    assert not checkpoint.review_row_removed
+    assert not checkpoint.queue_row_updated
+    assert queue.updates == []

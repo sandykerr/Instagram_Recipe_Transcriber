@@ -11,6 +11,7 @@ from .interfaces import (
     RecipeMasterWriter,
     RejectedRecipeWriter,
     ReviewDecisionReader,
+    ReviewQueueStateWriter,
     ReviewResolutionStore,
     ReviewRowRemover,
     ReviewStore,
@@ -18,6 +19,7 @@ from .interfaces import (
 from .models import (
     PublicationArtifact,
     QueuedRecipe,
+    QueueStatus,
     RecipeDocumentPresentation,
     RecipeInstructionFormat,
     ReviewArtifact,
@@ -50,6 +52,7 @@ class ReviewPromotionWorkflow:
         review_store: ReviewStore,
         resolution_store: ReviewResolutionStore,
         review_row_remover: ReviewRowRemover,
+        queue_state_writer: ReviewQueueStateWriter,
         document_writer: RecipeDocumentWriter,
         master_writer: RecipeMasterWriter,
         publication_store: PublicationStore,
@@ -61,6 +64,7 @@ class ReviewPromotionWorkflow:
         self._review_store = review_store
         self._resolution_store = resolution_store
         self._review_row_remover = review_row_remover
+        self._queue_state_writer = queue_state_writer
         self._document_writer = document_writer
         self._master_writer = master_writer
         self._publication_store = publication_store
@@ -138,16 +142,26 @@ class ReviewPromotionWorkflow:
             self._review_row_remover.remove(decision)
             resolution = resolution.model_copy(update={"review_row_removed": True})
             self._resolution_store.save(resolution)
+        if not resolution.queue_row_updated:
+            self._queue_state_writer.resolve(
+                decision,
+                (
+                    QueueStatus.PUBLISHED
+                    if resolution.decision is ReviewDecisionStatus.ACCEPTED
+                    else QueueStatus.REJECTED
+                ),
+                str(resolution.document.url),
+            )
+            resolution = resolution.model_copy(update={"queue_row_updated": True})
+            self._resolution_store.save(resolution)
         return resolution
 
-    def process_all(
-        self, *, max_items: int | None = None
-    ) -> ReviewPromotionBatchResult:
+    def process_all(self, *, max_items: int | None = None) -> ReviewPromotionBatchResult:
         """Process approved/rejected rows sequentially, stopping when none remain.
 
-        Errors deliberately stop the batch. The unresolved row remains in the
-        Review Sheet and its checkpoint preserves any completed work for a safe
-        retry; continuing would otherwise repeatedly select that same row.
+        Errors deliberately stop the batch. Checkpoints preserve completed work
+        for a safe retry of the same decision. Once the active row is removed,
+        a missing queue update can also be repaired by review reconciliation.
         """
 
         if max_items is not None and max_items < 1:

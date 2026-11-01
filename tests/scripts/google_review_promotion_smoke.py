@@ -1,8 +1,8 @@
 """Resolve one Approved, Accepted, or Rejected Review Sheet row and verify safe retry.
 
 This is an explicit manual Google integration test. It creates or moves real Docs,
-appends a real spreadsheet row, and deletes one active Review Sheet row. It is not
-part of pytest and requires --execute-writes.
+appends a real spreadsheet row, deletes one active Review Sheet row, and updates
+the Input queue row. It is not part of pytest and requires --execute-writes.
 """
 
 from __future__ import annotations
@@ -19,11 +19,13 @@ from instagram_recipe_transcriber.google_adapters import (
     GoogleSheetsRecipeMasterWriter,
     GoogleSheetsRejectedRecipeWriter,
     GoogleSheetsReviewDecisionReader,
+    GoogleSheetsReviewQueueStateWriter,
     GoogleSheetsReviewRowRemover,
 )
 from instagram_recipe_transcriber.google_oauth import GoogleOAuthServiceFactory
 from instagram_recipe_transcriber.models import (
     QueuedRecipe,
+    QueueStatus,
     RecipeCandidate,
     RecipeDocument,
     RecipeDocumentPresentation,
@@ -128,6 +130,17 @@ class TrackedResolutionStore:
         self._delegate.save(resolution)
 
 
+class TrackedQueueStateWriter:
+    def __init__(self, delegate: GoogleSheetsReviewQueueStateWriter) -> None:
+        self._delegate = delegate
+        self.calls = 0
+
+    def resolve(self, decision: ReviewDecision, status: QueueStatus, detail: str) -> None:
+        print(f"Updating {decision.recipe_id} Input queue status to {status.value}...")
+        self.calls += 1
+        self._delegate.resolve(decision, status, detail)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -186,6 +199,7 @@ def external_counts(
     rejected_organizer: TrackedOrganizer,
     rejected_writer: TrackedRejectedWriter,
     row_remover: TrackedRowRemover,
+    queue_state_writer: TrackedQueueStateWriter,
 ) -> dict[str, int]:
     return {
         "final_doc_creates": document_writer.calls,
@@ -194,6 +208,7 @@ def external_counts(
         "rejected_folder_moves": rejected_organizer.calls,
         "rejected_row_appends": rejected_writer.calls,
         "review_row_deletes": row_remover.calls,
+        "queue_row_updates": queue_state_writer.calls,
     }
 
 
@@ -206,6 +221,7 @@ def expected_counts(decision: ReviewDecisionStatus) -> dict[str, int]:
         "rejected_folder_moves": int(not accepted),
         "rejected_row_appends": int(not accepted),
         "review_row_deletes": 1,
+        "queue_row_updates": 1,
     }
 
 
@@ -228,8 +244,7 @@ def main() -> None:
     checkpoint_path = resolution_path(config, decision.recipe_id)
     if checkpoint_path.exists():
         raise RuntimeError(
-            "This clean smoke requires no pre-existing resolution checkpoint: "
-            f"{checkpoint_path}"
+            f"This clean smoke requires no pre-existing resolution checkpoint: {checkpoint_path}"
         )
 
     assert config.review_spreadsheet_id is not None
@@ -268,11 +283,18 @@ def main() -> None:
             spreadsheet_id=config.review_spreadsheet_id,
         )
     )
+    queue_state_writer = TrackedQueueStateWriter(
+        GoogleSheetsReviewQueueStateWriter(
+            services.sheets,
+            spreadsheet_id=config.queue_spreadsheet_id,
+        )
+    )
     workflow = ReviewPromotionWorkflow(
         decision_reader=decision_reader,
         review_store=review_store,
         resolution_store=resolution_store,
         review_row_remover=row_remover,
+        queue_state_writer=queue_state_writer,
         document_writer=document_writer,
         master_writer=master_writer,
         publication_store=JsonPublicationStore(config.working_root / "publication"),
@@ -288,10 +310,11 @@ def main() -> None:
     assert first is not None
     assert first.decision is decision.decision
     assert first.review_row_removed
+    assert first.queue_row_updated
     assert checkpoint_path.is_file()
-    persisted = JsonReviewResolutionStore(
-        config.working_root / "review-resolution"
-    ).load(decision.recipe_id)
+    persisted = JsonReviewResolutionStore(config.working_root / "review-resolution").load(
+        decision.recipe_id
+    )
     assert persisted == first
     assert external_counts(
         document_writer,
@@ -300,6 +323,7 @@ def main() -> None:
         rejected_organizer,
         rejected_writer,
         row_remover,
+        queue_state_writer,
     ) == expected_counts(decision.decision)
 
     if decision.decision is ReviewDecisionStatus.ACCEPTED:
@@ -320,6 +344,7 @@ def main() -> None:
         rejected_organizer,
         rejected_writer,
         row_remover,
+        queue_state_writer,
     )
     saves_after_first = resolution_store.save_calls
     checkpoint_after_first = checkpoint_path.read_bytes()
@@ -328,14 +353,18 @@ def main() -> None:
     second = workflow.process_next()
     retry_elapsed = time.perf_counter() - started
     assert second == first
-    assert external_counts(
-        document_writer,
-        accepted_organizer,
-        master_writer,
-        rejected_organizer,
-        rejected_writer,
-        row_remover,
-    ) == counts_after_first
+    assert (
+        external_counts(
+            document_writer,
+            accepted_organizer,
+            master_writer,
+            rejected_organizer,
+            rejected_writer,
+            row_remover,
+            queue_state_writer,
+        )
+        == counts_after_first
+    )
     assert resolution_store.save_calls == saves_after_first
     assert checkpoint_path.read_bytes() == checkpoint_after_first
 
@@ -349,7 +378,7 @@ def main() -> None:
     print(f"resolution_saves: {resolution_store.save_calls}")
     print(f"decision_replays: {decision_reader.calls}")
     print("PASS: persisted resolution checkpoint matches the workflow result")
-    print("PASS: retry made no duplicate Doc, row, move, or deletion")
+    print("PASS: retry made no duplicate Doc, row, move, deletion, or queue update")
     print(f"First pass: {first_elapsed:.2f}s; retry: {retry_elapsed:.2f}s")
     print(f"Checkpoint: {checkpoint_path}")
 

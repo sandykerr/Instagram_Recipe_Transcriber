@@ -216,6 +216,7 @@ class ReviewResolutionArtifact(BaseModel):
     master_row_written: bool = False
     rejected_row_written: bool = False
     review_row_removed: bool = False
+    queue_row_updated: bool = False
 
 
 class SourceArtifact(BaseModel):
