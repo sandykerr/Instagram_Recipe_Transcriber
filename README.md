@@ -17,8 +17,8 @@ Queue Sheet
      or Review Doc + Review Sheet
 ```
 
-Blank queue statuses are treated as `Pending`. Terminal queue statuses are
-`Published`, `Review`, and `Error`. Approved review items are published;
+Blank queue statuses are treated as `Pending`. Queue outcomes include
+`Published`, `Review`, `Rejected`, and `Error`. Approved review items are published;
 rejected items are archived in the configured rejected folder and Sheet.
 Local JSON checkpoints make retries idempotent.
 
@@ -91,6 +91,37 @@ PYTHONPATH=src python tests/scripts/process_google_reviews.py \
 Both commands make real external changes. Queue processing may also make paid
 OpenAI requests. Check the configured Sheet rows and local checkpoints before
 using unlimited mode.
+
+### Synchronize review state
+
+Preview repairs across every configured Input and active Review Sheet category
+tab, using local review and resolution checkpoints:
+
+```bash
+PYTHONPATH=src python tests/scripts/sync_google_review_state.py
+```
+
+The default is read-only: it reports planned append/remove/update/conflict counts
+and affected internal recipe IDs. Pass `--config PATH` to use a different local
+configuration. To apply the inspected plan, rerun with explicit write permission:
+
+```bash
+PYTHONPATH=src python tests/scripts/sync_google_review_state.py --execute-writes
+```
+
+Execution reads a fresh snapshot and refuses all writes if any identity or
+checkpoint conflict exists; malformed nonblank rows also fail before any write.
+Missing unresolved reviews are restored with their existing Review Doc link.
+Resolved active reviews are removed, and Input rows become `Published` or
+`Rejected` with the resulting Doc link. Deletions run bottom-up within each tab
+and recheck the exact source URL immediately before deletion. Already-correct
+rows and `Pending`, `Processing`, or `Error` statuses are left unchanged.
+
+The command makes no OpenAI calls and does not create Docs, move Drive files,
+or rewrite checkpoints. OAuth may refresh its local token file even during a
+dry-run. Avoid concurrent Sheet edits while applying; Google changes are not
+transactional. If execution fails partway through, inspect a fresh dry-run before
+retrying: reconciliation uses current rows rather than checkpoint write flags.
 
 ## Documentation
 

@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 from pydantic import HttpUrl
 
+from instagram_recipe_transcriber import google_adapters
 from instagram_recipe_transcriber.acquisition import YtDlpAcquirer, recipe_id_for_url
 from instagram_recipe_transcriber.errors import PipelineOperationalError
 from instagram_recipe_transcriber.google_adapters import (
@@ -36,8 +37,14 @@ from instagram_recipe_transcriber.models import (
     RecipeOutcome,
     ReviewDecision,
     ReviewDecisionStatus,
+    ReviewResolutionArtifact,
     SourceKind,
     ValidationArtifact,
+)
+from instagram_recipe_transcriber.review_sync import (
+    ActiveReviewRow,
+    ReviewRemovalAction,
+    ReviewSyncPlan,
 )
 
 
@@ -74,12 +81,27 @@ class _Values:
 class _SheetsService:
     def __init__(self, values_by_range: dict[str, list[list[str]]]) -> None:
         self.values_api = _Values(values_by_range)
+        self.batch_calls: list[dict[str, object]] = []
 
     def spreadsheets(self) -> _SheetsService:
         return self
 
     def values(self) -> _Values:
         return self.values_api
+
+    def get(self, **kwargs: object) -> _Request:
+        return _Request(
+            {
+                "sheets": [
+                    {"properties": {"sheetId": 7, "title": "Desserts"}},
+                    {"properties": {"sheetId": 8, "title": "Chef's Picks"}},
+                ]
+            }
+        )
+
+    def batchUpdate(self, **kwargs: object) -> _Request:
+        self.batch_calls.append(kwargs)
+        return _Request({})
 
 
 class _Documents:
@@ -138,6 +160,147 @@ def _queued_recipe() -> QueuedRecipe:
         queue_row_number=2,
         description="Quick weeknight recipe",
     )
+
+
+def test_sync_snapshot_reads_every_tab_and_preserves_row_numbers() -> None:
+    service = _SheetsService(
+        {
+            "'Desserts'!A2:D": [[], ["https://example.com/pasta", "Dinner", "Review", "old"]],
+            "'Chef''s Picks'!A2:D": [["https://example.com/cake", "", ""]],
+            "'Desserts'!A2:F": [
+                [
+                    "https://example.com/pasta",
+                    "Dinner",
+                    "Approved",
+                    "https://docs.google.com/document/d/review/edit",
+                ]
+            ],
+            "'Chef''s Picks'!A2:F": [],
+        }
+    )
+    queue, active = google_adapters.GoogleSheetsReviewSyncSnapshotReader(
+        service,
+        queue_spreadsheet_id="input",
+        review_spreadsheet_id="review",
+        categories=("Desserts", "Chef's Picks"),
+    ).read()
+
+    assert [(row.category, row.queue_row_number, row.status, row.detail) for row in queue] == [
+        ("Desserts", 3, QueueStatus.REVIEW, "old"),
+        ("Chef's Picks", 2, QueueStatus.PENDING, None),
+    ]
+    assert queue[0].recipe_id == recipe_id_for_url("https://example.com/pasta")
+    assert [(row.category, row.review_row_number) for row in active] == [("Desserts", 2)]
+    assert {(call["spreadsheetId"], call["range"]) for call in service.values_api.get_calls} == {
+        ("input", "'Desserts'!A2:D"),
+        ("input", "'Chef''s Picks'!A2:D"),
+        ("review", "'Desserts'!A2:F"),
+        ("review", "'Chef''s Picks'!A2:F"),
+    }
+    assert (
+        not service.values_api.append_calls + service.values_api.update_calls + service.batch_calls
+    )
+
+
+@pytest.mark.parametrize(
+    ("sheet", "row"),
+    [
+        ("queue", ["", "orphan description"]),
+        ("queue", ["not-a-url", "", "review"]),
+        ("queue", ["https://example.com/pasta", "", "mystery"]),
+        ("queue", "not-a-row"),
+        ("queue", [123]),
+        ("review", ["https://example.com/pasta", "", "review"]),
+        ("review", ["https://example.com/pasta", "", "mystery", "https://example.com/doc"]),
+        ("review", ["https://example.com/pasta", "", "review", "not-a-doc-url"]),
+    ],
+)
+def test_sync_snapshot_rejects_malformed_nonblank_rows(sheet: str, row: object) -> None:
+    values = {"'Desserts'!A2:D": [], "'Desserts'!A2:F": []}
+    values["'Desserts'!A2:D" if sheet == "queue" else "'Desserts'!A2:F"] = [row]
+    service = _SheetsService(cast(Any, values))
+    reader = google_adapters.GoogleSheetsReviewSyncSnapshotReader(
+        service,
+        queue_spreadsheet_id="input",
+        review_spreadsheet_id="review",
+        categories=("Desserts",),
+    )
+
+    with pytest.raises(PipelineOperationalError, match="Desserts.*2"):
+        reader.read()
+    assert (
+        not service.values_api.append_calls + service.values_api.update_calls + service.batch_calls
+    )
+
+
+def _sync_removal(category: str, number: int) -> ReviewRemovalAction:
+    return ReviewRemovalAction(
+        active_row=ActiveReviewRow(
+            recipe_id=f"pasta-{number}",
+            source_url=HttpUrl(f"https://example.com/{number}"),
+            category=category,
+            review_row_number=number,
+            review_document_url=HttpUrl("https://example.com/review"),
+        ),
+        resolution=ReviewResolutionArtifact(
+            recipe_id=f"pasta-{number}",
+            decision=ReviewDecisionStatus.ACCEPTED,
+            document=RecipeDocument(
+                document_id="final", title="Pasta", url=HttpUrl("https://example.com/final")
+            ),
+        ),
+    )
+
+
+def test_sync_applier_deletes_bottom_up_per_exact_tab() -> None:
+    service = _SheetsService(
+        {
+            "'Desserts'!A3:F3": [["https://example.com/3"]],
+            "'Desserts'!A5:F5": [["https://example.com/5"]],
+            "'Chef''s Picks'!A2:F2": [["https://example.com/2"]],
+        }
+    )
+    applier = google_adapters.GoogleSheetsReviewSyncApplier(
+        service,
+        queue_spreadsheet_id="input",
+        review_spreadsheet_id="review",
+    )
+    applier.apply(
+        ReviewSyncPlan(
+            removals=(
+                _sync_removal("Desserts", 3),
+                _sync_removal("Desserts", 5),
+                _sync_removal("Chef's Picks", 2),
+            )
+        )
+    )
+
+    ranges = [
+        cast(Any, call)["body"]["requests"][0]["deleteDimension"]["range"]
+        for call in service.batch_calls
+    ]
+    assert ranges == [
+        {"sheetId": 8, "dimension": "ROWS", "startIndex": 1, "endIndex": 2},
+        {"sheetId": 7, "dimension": "ROWS", "startIndex": 4, "endIndex": 5},
+        {"sheetId": 7, "dimension": "ROWS", "startIndex": 2, "endIndex": 3},
+    ]
+    assert all(call["spreadsheetId"] == "review" for call in service.batch_calls)
+
+
+@pytest.mark.parametrize("live", [[], [["https://example.com/changed"]]])
+def test_sync_deletion_revalidation_refuses_a_changed_or_missing_url(
+    live: list[list[str]],
+) -> None:
+    service = _SheetsService({"'Desserts'!A3:F3": live})
+    applier = google_adapters.GoogleSheetsReviewSyncApplier(
+        service,
+        queue_spreadsheet_id="input",
+        review_spreadsheet_id="review",
+    )
+
+    with pytest.raises(PipelineOperationalError, match="changed"):
+        applier.apply(ReviewSyncPlan(removals=(_sync_removal("Desserts", 3),)))
+    assert service.batch_calls == []
 
 
 def _recipe() -> RecipeCandidate:

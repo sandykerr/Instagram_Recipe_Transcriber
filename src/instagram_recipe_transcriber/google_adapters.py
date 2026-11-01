@@ -22,6 +22,206 @@ from .models import (
     ReviewDecision,
     ReviewDecisionStatus,
 )
+from .review_sync import ActiveReviewRow, ReviewQueueRow, ReviewSyncPlan
+
+
+class GoogleSheetsReviewSyncSnapshotReader:
+    """Read every configured Input/Review tab without discarding malformed rows."""
+
+    def __init__(
+        self,
+        service: Any,
+        *,
+        queue_spreadsheet_id: str,
+        review_spreadsheet_id: str,
+        categories: Iterable[str],
+    ) -> None:
+        self._service = service
+        self._queue_id = queue_spreadsheet_id
+        self._review_id = review_spreadsheet_id
+        self._categories = tuple(categories)
+        if not self._queue_id or not self._review_id or not self._categories:
+            raise ValueError("Input/Review spreadsheet IDs and categories are required")
+
+    def read(self) -> tuple[tuple[ReviewQueueRow, ...], tuple[ActiveReviewRow, ...]]:
+        queue: list[ReviewQueueRow] = []
+        active: list[ActiveReviewRow] = []
+        for category in self._categories:
+            queue_values = _sync_values(self._service, self._queue_id, _queue_range(category))
+            for number, row in enumerate(queue_values, start=2):
+                if not any(cell.strip() for cell in row):
+                    continue
+                try:
+                    queue.append(
+                        ReviewQueueRow(
+                            recipe_id=recipe_id_for_url(row[0].strip()),
+                            source_url=HttpUrl(row[0].strip()),
+                            category=category,
+                            queue_row_number=number,
+                            status=_queue_status(row[2] if len(row) > 2 else ""),
+                            description=_optional_cell(row, 1),
+                            detail=_optional_cell(row, 3),
+                        )
+                    )
+                except (ValueError, PipelineOperationalError) as error:
+                    raise PipelineOperationalError(
+                        f"Malformed Input row in {category!r} at row {number}"
+                    ) from error
+            review_values = _sync_values(self._service, self._review_id, _review_range(category))
+            for number, row in enumerate(review_values, start=2):
+                if not any(cell.strip() for cell in row):
+                    continue
+                try:
+                    if len(row) < 4 or row[2].strip().lower() not in {
+                        "review",
+                        "accepted",
+                        "approved",
+                        "rejected",
+                    }:
+                        raise ValueError("Missing or unknown review status/document")
+                    active.append(
+                        ActiveReviewRow(
+                            recipe_id=recipe_id_for_url(row[0].strip()),
+                            source_url=HttpUrl(row[0].strip()),
+                            category=category,
+                            review_row_number=number,
+                            description=_optional_cell(row, 1),
+                            review_document_url=HttpUrl(row[3].strip()),
+                        )
+                    )
+                except ValueError as error:
+                    raise PipelineOperationalError(
+                        f"Malformed Review row in {category!r} at row {number}"
+                    ) from error
+        return tuple(queue), tuple(active)
+
+
+class GoogleSheetsReviewSyncApplier:
+    """Apply a conflict-free plan; revalidate and delete bottom-up within tabs.
+
+    Local checkpoint flags are deliberately untouched: the next live snapshot
+    remains authoritative, including after a partially completed provider call.
+    """
+
+    def __init__(
+        self,
+        service: Any,
+        *,
+        queue_spreadsheet_id: str,
+        review_spreadsheet_id: str,
+    ) -> None:
+        self._service = service
+        self._queue_id = queue_spreadsheet_id
+        self._review_id = review_spreadsheet_id
+        if not self._queue_id or not self._review_id:
+            raise ValueError("Input/Review spreadsheet IDs are required")
+
+    def apply(self, plan: ReviewSyncPlan) -> None:
+        if plan.conflicts:
+            raise PipelineOperationalError("Cannot execute a review sync plan with conflicts")
+        # Delete before appending so appends cannot affect the original locations.
+        for action in sorted(
+            plan.removals,
+            key=lambda action: (action.active_row.category, -action.active_row.review_row_number),
+        ):
+            self._remove(action.active_row)
+        writer = GoogleSheetsRecipeReviewWriter(self._service, spreadsheet_id=self._review_id)
+        for append in plan.appends:
+            writer.append(_sync_queued_recipe(append.queue_row), append.review.document)
+        state_writer = GoogleSheetsRecipeQueueStateWriter(
+            self._service,
+            spreadsheet_id=self._queue_id,
+        )
+        for update in plan.queue_updates:
+            state_writer.mark(_sync_queued_recipe(update.queue_row), update.status, update.detail)
+
+    def _remove(self, row: ActiveReviewRow) -> None:
+        try:
+            metadata = (
+                self._service.spreadsheets()
+                .get(
+                    spreadsheetId=self._review_id,
+                    fields="sheets(properties(sheetId,title))",
+                )
+                .execute()
+            )
+            matches = [
+                sheet["properties"]["sheetId"]
+                for sheet in metadata["sheets"]
+                if sheet["properties"]["title"] == row.category
+            ]
+            if len(matches) != 1:
+                raise ValueError("Review category must match exactly one tab")
+        except Exception as error:
+            raise PipelineOperationalError(
+                f"Cannot resolve Review tab {row.category!r} for deletion"
+            ) from error
+        number = row.review_row_number
+        live = _sync_values(
+            self._service,
+            self._review_id,
+            f"{_a1_tab(row.category)}!A{number}:F{number}",
+            start_row=number,
+        )
+        if len(live) != 1 or not live[0] or live[0][0] != str(row.source_url):
+            raise PipelineOperationalError(
+                f"Review row changed in {row.category!r} at row {number}; refusing deletion"
+            )
+        try:
+            self._service.spreadsheets().batchUpdate(
+                spreadsheetId=self._review_id,
+                body={
+                    "requests": [
+                        {
+                            "deleteDimension": {
+                                "range": {
+                                    "sheetId": matches[0],
+                                    "dimension": "ROWS",
+                                    "startIndex": number - 1,
+                                    "endIndex": number,
+                                }
+                            }
+                        }
+                    ]
+                },
+            ).execute()
+        except Exception as error:
+            raise PipelineOperationalError("Cannot remove resolved Review Sheet row") from error
+
+
+def _sync_queued_recipe(row: ReviewQueueRow) -> QueuedRecipe:
+    return QueuedRecipe.model_validate(row.model_dump(exclude={"detail"}))
+
+
+def _sync_values(
+    service: Any,
+    spreadsheet_id: str,
+    range_name: str,
+    *,
+    start_row: int = 2,
+) -> list[list[str]]:
+    """Strict Sheets boundary: never filter out malformed rows or shift locations."""
+    try:
+        response = (
+            service.spreadsheets()
+            .values()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                range=range_name,
+            )
+            .execute()
+        )
+        values = response.get("values", [])
+    except Exception as error:
+        raise PipelineOperationalError(f"Cannot read sync snapshot {range_name}") from error
+    if not isinstance(values, list):
+        raise PipelineOperationalError(f"Invalid sync values in {range_name}")
+    rows: list[list[str]] = []
+    for number, row in enumerate(values, start=start_row):
+        if not isinstance(row, list) or any(not isinstance(cell, str) for cell in row):
+            raise PipelineOperationalError(f"Malformed sync row in {range_name} at row {number}")
+        rows.append(row)
+    return rows
 
 
 class GoogleSheetsRecipeQueueReader:
